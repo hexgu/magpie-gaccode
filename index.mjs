@@ -1,6 +1,6 @@
 // GACCode provider for OpenCode and magpie.
 // API key authentication; optional website JWT for account details/refill requests.
-// Claude uses Messages, Codex uses Responses. Direct Gemini GenAI is opt-in.
+// Claude uses Messages, Codex uses Responses. Gemini GenAI is endpoint-specific.
 import { createAutoRefill } from "./refill.mjs"
 const PROVIDER = "gaccode"
 const HOST_DEFAULT = "https://gaccode.com"
@@ -20,45 +20,47 @@ function rememberModel(model, descriptor, override) {
     authentication: "unverified", // A catalog does not prove inference access.
     overrides: Object.freeze(Object.keys(override)),
     capabilities: Object.freeze({
-      toolCall: Object.hasOwn(override, "tool_call") ? "user-configured" : "unknown",
-      reasoning: Object.hasOwn(override, "reasoning") ? "user-configured" : "unknown",
+      toolCall: Object.hasOwn(override, "tool_call") ? "user-configured" : known[descriptor.id] ? "bundled-default" : "unknown",
+      reasoning: Object.hasOwn(override, "reasoning") ? "user-configured" : descriptor.reasoning !== undefined ? "bundled-default" : "unknown",
       limits: Object.freeze(Object.keys(override.limit ?? {})),
     }),
   }))
   return model
 }
 
-// The public catalog confirms names, not token limits or model capabilities.
+// Original known-model configuration defaults are preserved. They are
+// configurable declarations, not endpoint capability guarantees.
 const CLAUDE_MODELS = [
-  { id: "claude-sonnet-5-5", name: "Claude Sonnet 5.5" },
-  { id: "claude-opus-5-5", name: "Claude Opus 5.5" },
-  { id: "claude-fable-5", name: "Claude Fable 5" },
-  { id: "claude-opus-4-7", name: "Claude Opus 4.7" },
-  { id: "claude-opus-4-6", name: "Claude Opus 4.6" },
-  { id: "claude-opus-4-5", name: "Claude Opus 4.5" },
-  { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
-  { id: "claude-sonnet-4-5", name: "Claude Sonnet 4.5" },
-  { id: "claude-haiku-4-5", name: "Claude Haiku 4.5" },
+  { id: "claude-sonnet-5-5", name: "Claude Sonnet 5.5", context: 200_000, output: 64_000, reasoning: true, images: true },
+  { id: "claude-opus-5-5", name: "Claude Opus 5.5", context: 200_000, output: 64_000, reasoning: true, images: true },
+  { id: "claude-fable-5", name: "Claude Fable 5", context: 200_000, output: 64_000, reasoning: true, images: true },
+  { id: "claude-opus-4-7", name: "Claude Opus 4.7", context: 200_000, output: 64_000, reasoning: true, images: true },
+  { id: "claude-opus-4-6", name: "Claude Opus 4.6", context: 200_000, output: 64_000, reasoning: true, images: true },
+  { id: "claude-opus-4-5", name: "Claude Opus 4.5", context: 200_000, output: 64_000, reasoning: true, images: true },
+  { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", context: 200_000, output: 64_000, reasoning: true, images: true },
+  { id: "claude-sonnet-4-5", name: "Claude Sonnet 4.5", context: 200_000, output: 64_000, reasoning: true, images: true },
+  { id: "claude-haiku-4-5", name: "Claude Haiku 4.5", context: 200_000, output: 64_000, reasoning: false, images: true },
 ].map((m) => ({ ...m, family: "claude" }))
 
 const CODEX_MODELS = [
-  { id: "gpt-6.1-sol", name: "GPT-6.1 Sol" },
-  { id: "gpt-6-astra", name: "GPT-6 Astra" },
-  { id: "gpt-6-sol", name: "GPT-6 Sol" },
-  { id: "gpt-6-luna", name: "GPT-6 Luna" },
-  { id: "gpt-5.6-sol", name: "GPT-5.6 Sol" },
-  { id: "gpt-5.6-terra", name: "GPT-5.6 Terra" },
-  { id: "gpt-5.6-luna", name: "GPT-5.6 Luna" },
-  { id: "gpt-5.5", name: "GPT-5.5" },
+  { id: "gpt-6.1-sol", name: "GPT-6.1 Sol", context: 400_000, output: 128_000, reasoning: true, images: true },
+  { id: "gpt-6-astra", name: "GPT-6 Astra", context: 400_000, output: 128_000, reasoning: true, images: true },
+  { id: "gpt-6-sol", name: "GPT-6 Sol", context: 400_000, output: 128_000, reasoning: true, images: true },
+  { id: "gpt-6-luna", name: "GPT-6 Luna", context: 400_000, output: 128_000, reasoning: true, images: true },
+  { id: "gpt-5.6-sol", name: "GPT-5.6 Sol", context: 400_000, output: 128_000, reasoning: true, images: true },
+  { id: "gpt-5.6-terra", name: "GPT-5.6 Terra", context: 400_000, output: 128_000, reasoning: true, images: true },
+  { id: "gpt-5.6-luna", name: "GPT-5.6 Luna", context: 400_000, output: 128_000, reasoning: true, images: true },
+  { id: "gpt-5.5", name: "GPT-5.5", context: 400_000, output: 128_000, reasoning: true, images: true },
 ].map((m) => ({ ...m, family: "codex" }))
 
-// These four IDs appear in GACCode's Gemini installation guide.
-// That guide uses Code Assist, not this experimental direct GenAI endpoint.
+// Preserve the original Gemini entries; direct GenAI compatibility remains
+// endpoint-specific.
 const GEMINI_MODELS = [
-  { id: "gemini-3-pro-high", name: "Gemini 3 Pro High" },
-  { id: "gemini-3-pro-low", name: "Gemini 3 Pro Low" },
-  { id: "gemini-3-flash", name: "Gemini 3 Flash" },
-  { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro" },
+  { id: "gemini-3-pro-high", name: "Gemini 3 Pro High", context: 1_000_000, output: 65_536, reasoning: true, images: true },
+  { id: "gemini-3-pro-low", name: "Gemini 3 Pro Low", context: 1_000_000, output: 65_536, reasoning: true, images: true },
+  { id: "gemini-3-flash", name: "Gemini 3 Flash", context: 1_000_000, output: 65_536, reasoning: true, images: true },
+  { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", context: 1_000_000, output: 65_536, reasoning: true, images: true },
+  { id: "gemini-2.5-flash", name: "Gemini 2.5 Flash", context: 1_000_000, output: 65_536, reasoning: true, images: true },
 ].map((m) => ({ ...m, family: "gemini" }))
 
 const known = Object.fromEntries(
@@ -90,14 +92,16 @@ function prettyName(id) { return known[id]?.name ?? id }
 
 function configModel(m, host, override = {}) {
   const route = routeFor(m.family, host)
+  const variants = m.reasoning ? { low: {}, medium: {}, high: {}, ...(m.family === "codex" ? { xhigh: {} } : {}) } : {}
   return rememberModel({
     name: m.family === "gemini" ? `${m.name ?? prettyName(m.id)} (experimental)` : m.name ?? prettyName(m.id),
-    reasoning: false,
-    tool_call: false,
-    variants: {},
+    reasoning: m.reasoning ?? false,
+    tool_call: !!known[m.id],
+    variants,
+    ...(m.images ? { attachment: true, modalities: { input: ["text", "image"], output: ["text"] } } : {}),
     ...override,
     provider: { ...route, ...(override.provider ?? {}) },
-    limit: { context: 0, output: 0, ...(override.limit ?? {}) },
+    limit: { context: m.context ?? 0, output: m.output ?? 0, ...(override.limit ?? {}) },
   }, m, override)
 }
 
@@ -172,16 +176,18 @@ async function liveModels(host, apiKey, experimentalGemini = false) {
   const families = ["claude", "codex", ...(experimentalGemini ? ["gemini"] : [])]
   const settled = await Promise.allSettled(families.map((family) =>
     family === "gemini"
-      ? listGeminiModels(`${geminiBase(host)}/models`, { "x-goog-api-key": apiKey })
+      ? apiKey ? listGeminiModels(`${geminiBase(host)}/models`, { "x-goog-api-key": apiKey }) : Promise.reject(new Error("Gemini catalog needs an API key"))
       : listOpenAIModels(`${routeFor(family, host).api}/models`),
   ))
-  const failed = settled.findIndex((r) => r.status === "rejected")
+  const failed = settled.findIndex((r, n) => r.status === "rejected" && families[n] !== "gemini")
   if (failed !== -1) throw new Error(`${families[failed]} catalog unavailable: ${settled[failed].reason.message}`)
   const checkedAt = new Date().toISOString()
-  const list = settled.flatMap((r, n) => [...new Set(r.value)].map((id) => ({
-    id, family: families[n], name: prettyName(id), checkedAt, catalogPresent: true,
-    source: `${routeFor(families[n], host).api}/models`,
-  })))
+  const list = settled.flatMap((r, n) => r.status === "rejected"
+    ? GEMINI_MODELS.map((m) => ({ ...m, source: "bundled-catalog", checkedAt: null, catalogPresent: null }))
+    : [...new Set(r.value)].map((id) => ({
+      ...known[id], id, family: families[n], name: prettyName(id), checkedAt, catalogPresent: true,
+      source: `${routeFor(families[n], host).api}/models`,
+    })))
   if (new Set(list.map((m) => m.id)).size !== list.length) {
     throw new Error("Ambiguous model ID shared by GACCode protocol catalogs")
   }
@@ -228,11 +234,11 @@ function accountEmail(auth, me) {
   )
 }
 
-async function readJson(url, headers) {
+async function readJson(url, headers, signal = AbortSignal.timeout(12_000)) {
   const res = await fetch(url, {
     method: "GET",
     headers: { accept: "application/json", ...headers },
-    signal: AbortSignal.timeout(12_000),
+    signal,
   })
   if (!res.ok) {
     const error = new Error(`HTTP ${res.status}`)
@@ -242,11 +248,11 @@ async function readJson(url, headers) {
   return res.json()
 }
 
-async function siteFetch(host, path, token) {
+async function siteFetch(host, path, token, signal) {
   return readJson(`${host}/api${path}`, {
     authorization: `Bearer ${token}`,
     "accept-language": "zh",
-  })
+  }, signal)
 }
 
 async function statusFetch(auth) {
@@ -281,6 +287,43 @@ function ticketOnBeijingDay(ticket, day) {
   return Number.isFinite(date.getTime()) && beijingDateStr(date) === day
 }
 
+async function ticketRefillReceipt(host, token, ticket) {
+  const ticketId = String(ticket.id ?? "")
+  if (!/^[1-9]\d*$/.test(ticketId) || !Number.isSafeInteger(Number(ticketId))) return { receipt: null }
+  const createdAt = ticket.createdAt ?? ticket.created_at
+  const start = typeof createdAt === "string" && /(?:Z|[+-]\d\d:\d\d)$/.test(createdAt) ? Date.parse(createdAt) : NaN
+  const end = Date.now()
+  if (!Number.isFinite(start) || start > end) throw new Error("工单时间格式未知")
+  const signal = AbortSignal.timeout(6_000)
+  const limit = 100
+  let total
+  for (let page = 1; page <= 5; page++) {
+    const query = new URLSearchParams({ page: String(page), limit: String(limit), startTime: createdAt, endTime: new Date(end).toISOString() })
+    const body = await siteFetch(host, `/credits/history?${query}`, token, signal)
+    const rows = body?.history
+    const pages = body?.totalPages
+    if (!Array.isArray(rows) || body.currentPage !== page || body.limit !== limit ||
+        !Number.isSafeInteger(body.total) || body.total < 0 || !Number.isSafeInteger(pages) || pages < 0 ||
+        !(pages === Math.ceil(body.total / limit) || (body.total === 0 && pages === 1)) ||
+        (total !== undefined && total !== body.total) ||
+        rows.length !== Math.min(limit, Math.max(0, body.total - (page - 1) * limit))) {
+      throw new Error("积分流水分页格式未知")
+    }
+    total = body.total
+    for (const row of rows) {
+      const reference = typeof row?.details === "string" ? row.details.match(/^Automatic refill via support ticket #([1-9]\d*)$/) : null
+      const at = typeof row?.createdAt === "string" && /(?:Z|[+-]\d\d:\d\d)$/.test(row.createdAt) ? Date.parse(row.createdAt) : NaN
+      if (row?.reason !== "refill" || typeof row.amount !== "number" || !Number.isFinite(row.amount) || row.amount <= 0 ||
+          typeof row.balanceAfter !== "number" || !Number.isFinite(row.balanceAfter) || reference?.[1] !== ticketId ||
+          !Number.isFinite(at) || at < start || at > end ||
+          (ticket.userId !== undefined && row.userId !== undefined && String(ticket.userId) !== String(row.userId))) continue
+      return { receipt: { ticketId, amount: row.amount, balanceAfter: row.balanceAfter, createdAt: row.createdAt } }
+    }
+    if (page >= pages) return { receipt: null }
+  }
+  return { receipt: null, receiptIncomplete: true }
+}
+
 async function todayRefillStatus(host, token) {
   const day = beijingDateStr()
   try {
@@ -288,7 +331,12 @@ async function todayRefillStatus(host, token) {
     const tickets = Array.isArray(body?.tickets) ? body.tickets : Array.isArray(body?.data) ? body.data : null
     if (!tickets) throw new Error("工单列表格式未知")
     const ticket = tickets.find((t) => isRefillTicket(t) && ticketOnBeijingDay(t, day))
-    return { day, already: !!ticket, ticket: ticket ?? null }
+    const result = { day, already: !!ticket, ticket: ticket ?? null }
+    if (ticket) {
+      try { Object.assign(result, await ticketRefillReceipt(host, token, ticket)) }
+      catch { result.receiptError = "积分流水读取失败" }
+    }
+    return result
   } catch (e) {
     return { day, already: false, ticket: null, error: e.status === 401 ? "网站登录已过期" : e.message }
   }
@@ -367,31 +415,38 @@ async function buildUsage(auth, refill) {
   // Website credentials stay on the website; choosing an inference relay
   // does not authorize sending a website session to that relay.
   const settled = await Promise.allSettled([
-    statusFetch(auth),
+    token ? siteFetch(HOST_DEFAULT, "/credits/balance", token) : statusFetch(auth),
     ...(token ? [
       siteFetch(HOST_DEFAULT, "/subscriptions", token),
       siteFetch(HOST_DEFAULT, "/me", token),
       siteFetch(HOST_DEFAULT, "/usd-account", token),
       siteFetch(HOST_DEFAULT, "/credits/booster-packs", token),
       todayRefillStatus(HOST_DEFAULT, token),
+      statusFetch(auth),
     ] : []),
   ])
   const out = { plan: "GACCode", windows: [], signIn: "kept" }
   const balanceLines = []
   const notes = []
   let money = ""
+  let appliedToday = false
   const status = settled[0]
+  const keyStatus = token ? settled[6] : status
+  const keyAccount = keyStatus?.status === "fulfilled" ? emailFromMe(keyStatus.value) : ""
+  const websiteAccount = token && settled[2]?.status === "fulfilled" ? emailFromMe(settled[2].value) : ""
+  const account = token ? websiteAccount : keyAccount
+  if (account) out.user = account
+  const sameAccount = !!websiteAccount && websiteAccount.toLowerCase() === keyAccount.toLowerCase()
   if (status.status === "fulfilled") {
-    const keyAccount = emailFromMe(status.value)
-    if (keyAccount) out.user = keyAccount
     const balance = finiteNumber(status.value?.balance)
     const cap = finiteNumber(status.value?.creditCap)
-    const mult = finiteNumber(status.value?.timeMultiplier?.value)
+    const mult = finiteNumber(status.value?.timeMultiplier?.value ??
+      (sameAccount ? keyStatus.value?.timeMultiplier?.value : undefined))
     if (balance === null) {
-      out.error = "积分状态未提供有效余额"
+      out.error = `${token ? "网站积分" : "积分状态"}未提供有效余额`
     } else {
       const count = cap !== null && cap > 0 ? `${balance} / ${cap}` : `${balance} 积分`
-      const refillRate = finiteNumber(status.value?.refillRate)
+      const refillRate = finiteNumber(status.value?.refillRate ?? status.value?.creditsPerHour)
       if (refillRate !== null) notes.push(`${refillRate}/时`)
       // 1x is the normal rate; a missing multiplier is left out, never guessed.
       if (mult !== null && mult > 0 && mult !== 1) notes.push(`时段 ${mult}x`)
@@ -405,24 +460,23 @@ async function buildUsage(auth, refill) {
       }
     }
   } else {
-    out.error = `积分状态读取失败（${status.reason?.message ?? "未知错误"}）`
+    out.error = `${token ? "网站积分" : "积分状态"}读取失败（${status.reason?.message ?? "未知错误"}）`
   }
 
   if (token) {
     const [, subscription, me, usdResult, packs, refillResult] = settled
-    const email = me.status === "fulfilled" ? accountEmail(auth, me.value) : emailFromJwt(token)
-    // Same email as the API key's statusline: the website account is the key's,
-    // so its plan heads the card and its email is not repeated.
-    const sameAccount = !!email && email.toLowerCase() === out.user?.toLowerCase()
+    // Credits and subscription are both website data under this JWT. Their
+    // identity and plan do not depend on the optional API-key statusline.
     const details = []
-    if (email && !sameAccount) details.push(`网站账户 ${email}`)
+    if (websiteAccount && keyAccount && !sameAccount) details.push(`API key 账户 ${keyAccount}`)
     if (subscription.status === "fulfilled") {
       const subscriptions = subscription.value?.subscriptions
       const first = Array.isArray(subscriptions) ? subscriptions[0] : null
-      const plan = first?.planName ?? first?.subscription?.name ?? first?.subscription?.tier
-      if (typeof plan === "string" && sameAccount) out.plan = plan
-      else if (typeof plan === "string") details.push(`套餐 ${plan}`)
+      const plan = first?.planName ?? first?.plan ?? first?.subscription?.name ?? first?.subscription?.tier ?? first?.name ?? first?.productName
+      if (typeof plan === "string") out.plan = plan
       else if (Array.isArray(subscriptions) && !subscriptions.length) details.push("无订阅")
+      if (typeof first?.endDate === "string") out.until = first.endDate
+      if (typeof first?.autoRenew === "boolean") out.renew = first.autoRenew ? "auto" : "off"
     } else {
       details.push(`套餐读取失败（${sourceError(subscription)}）`)
     }
@@ -438,12 +492,26 @@ async function buildUsage(auth, refill) {
     const refill = refillResult.status === "fulfilled" ? refillResult.value : { error: sourceError(refillResult) }
     // A found ticket shows an application, not credits arriving; none found proves nothing.
     if (refill.error) notes.push(`工单读取失败（${refill.error}）`)
-    else if (refill.already) notes.push(`今日已申请（工单${TICKET_STATES.get(refill.ticket?.status) ?? "状态未知"}）`)
+    else if (refill.already) {
+      appliedToday = true
+      notes.push(refill.receipt ? `今日已重置（+${refill.receipt.amount} 积分）`
+        : `今日已申请（工单${TICKET_STATES.get(refill.ticket?.status) ?? "状态未知"}）`)
+      if (refill.receiptError) notes.push(refill.receiptError)
+      else if (refill.receiptIncomplete) notes.push("积分流水未查全")
+    }
     notes.push(...details)
   }
-  // magpie shows a balance as one large figure, as other cards' amounts, and a
-  // window's display only up to its second " · " part: notes are that part.
-  if (refill) notes.push(await refill.text(auth, settled[2]))
+  // With no windows, magpie renders balance before error. Never let website
+  // details hide a failed credit query behind a large balance figure.
+  const autoNote = refill ? await refill.text(auth, settled[2]) : ""
+  if (out.error) {
+    if (autoNote && !["自动申请：选项关闭", "自动申请：待触发"].includes(autoNote)) out.error += `；${autoNote}`
+    return out
+  }
+  // magpie shows balance as one large figure, and a window's display only up
+  // to its second " · " part: with a credit cap, notes belong in that part.
+  if (autoNote && autoNote !== "自动申请：选项关闭" &&
+      !(appliedToday && ["自动申请：待触发", "自动申请：已申请", "自动申请：已有同日申请或待处理工单"].includes(autoNote))) notes.push(autoNote)
   const credit = out.windows[0]
   if (credit) {
     if (notes.length) credit.display += " · " + notes.join("，")
@@ -504,14 +572,16 @@ export const _internal = {
   PROVIDER, HOST_DEFAULT, CLAUDE_MODELS, CODEX_MODELS, GEMINI_MODELS,
   hostOf, claudeBase, codexBase, geminiBase, liveModels, prettyName,
   configModel, runtimeModel, buildUsage, listGeminiModels,
-  todayRefillStatus, extractUsd, summarizeBoosters, formatBoosterLine,
+  todayRefillStatus, ticketRefillReceipt, extractUsd, summarizeBoosters, formatBoosterLine,
   statusFetch, providerFetch,
   modelEvidence: (model) => modelRecords.get(model),
 }
 
 export async function GacCodePlugin({ client, directory } = {}, options = {}) {
-  const experimentalGemini = options?.experimentalGemini === true
-  const autoRequestRefill = options?.autoRequestRefill === true
+  const experimentalGemini = options?.experimentalGemini !== false
+  const autoRequestRefill = (auth) => Object.hasOwn(options ?? {}, "autoRequestRefill") && options.autoRequestRefill !== undefined
+    ? options.autoRequestRefill === true
+    : !["off", "false", "0"].includes(String(auth?.metadata?.autoDailyReset ?? "on").toLowerCase())
   const refill = createAutoRefill({ enabled: autoRequestRefill, directory })
   const defaults = [...CLAUDE_MODELS, ...CODEX_MODELS, ...(experimentalGemini ? GEMINI_MODELS : [])]
   let overrides = {}
@@ -573,8 +643,8 @@ export async function GacCodePlugin({ client, directory } = {}, options = {}) {
           hostPrompt,
           {
             type: "text", key: "loginToken",
-            message: "网站 JWT（可选，读取扩展信息；开启自动申请时也用于申请工单）",
-            placeholder: "基础积分使用 API key；留空可跳过网站信息",
+            message: "网站 JWT（按原版方式读取网站积分和套餐；自动申请也使用此凭证）",
+            placeholder: "浏览器登录后复制 localStorage.token；留空仅尝试 API key 基础查询",
           },
         ],
       }],
@@ -592,7 +662,7 @@ export async function GacCodePlugin({ client, directory } = {}, options = {}) {
               throw new Error("实验性 Gemini 未启用，请设置 experimentalGemini")
             }
             const response = await providerFetch(input, init, current, customEndpoints)
-            if (autoRequestRefill) {
+            if (autoRequestRefill(current)) {
               try {
                 const method = (init.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase()
                 const host = new URL(hostOf(current))
@@ -623,7 +693,6 @@ export async function GacCodePlugin({ client, directory } = {}, options = {}) {
         const key = auth?.type === "api" ? auth.key : undefined
         const host = hostOf(auth)
         try {
-          if (experimentalGemini && !key) throw new Error("Experimental Gemini catalog requires an API key")
           const list = await liveModels(host, key, experimentalGemini)
           return modelMap(list, host, provider.id ?? PROVIDER, true)
         } catch (e) {

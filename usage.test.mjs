@@ -5,7 +5,8 @@ const originalFetch = globalThis.fetch
 const baseAuth = { type: "api", key: "fake-api-key", metadata: {} }
 const withJwt = { ...baseAuth, metadata: { host: "https://relay05.gaccode.com", loginToken: "fake-site-jwt" } }
 const statusPath = "/claudecode/v1/cc-status-line"
-const sitePaths = ["/api/subscriptions", "/api/me", "/api/usd-account", "/api/credits/booster-packs", "/api/tickets?page=1&limit=20"]
+const creditPath = "/api/credits/balance"
+const sitePaths = [creditPath, "/api/subscriptions", "/api/me", "/api/usd-account", "/api/credits/booster-packs", "/api/tickets?page=1&limit=20"]
 let fixtureAccount = 0
 beforeEach(() => { globalThis.fetch = async () => { throw new Error("unexpected network request") } })
 afterEach(() => { globalThis.fetch = originalFetch })
@@ -32,7 +33,13 @@ function fakeUsage(replies = {}) {
       "/api/credits/history?limit=12": { history: [{ reason: "usage", createdAt: "2020-01-01T00:00:00Z", details: "Time Multiplier(7 - obsolete fixture)" }] },
     }
     const path = url.pathname + url.search
-    const reply = Object.hasOwn(replies, path) ? replies[path] : defaults[path]
+    let reply = Object.hasOwn(replies, path) ? replies[path] : defaults[path]
+    if (url.pathname === "/api/credits/history" && url.searchParams.has("page")) {
+      reply = replies["/api/credits/history"] ?? {
+        history: [], total: 0, totalPages: 0, currentPage: Number(url.searchParams.get("page")), limit: 100,
+      }
+    }
+    if (typeof reply === "function") reply = await reply(req)
     if (reply instanceof Error) throw reply
     if (reply instanceof Response) return reply.clone()
     return Response.json(reply ?? {})
@@ -45,6 +52,143 @@ async function usage(auth = baseAuth) {
 }
 
 const textOf = (u) => [u.error, u.balance, ...(u.windows ?? []).map((w) => w.display)].filter(Boolean).join(" · ")
+
+function receiptFixture(rows, historyReply) {
+  const createdAt = new Date().toISOString()
+  const ticket = { id: 4321, userId: 42, title: "请求重置积分", status: "CLOSED", createdAt }
+  const refill = { userId: 42, reason: "refill", amount: 12484, balanceAfter: 12000, createdAt, details: "Automatic refill via support ticket #4321" }
+  const history = rows(refill, ticket)
+  const seen = fakeUsage({
+    [creditPath]: { balance: -25, creditCap: 12000, refillRate: 300 },
+    "/api/tickets?page=1&limit=20": { tickets: [ticket] },
+    "/api/credits/history": historyReply ?? { history, total: history.length, totalPages: 1, currentPage: 1, limit: 100 },
+  })
+  return { seen, ticket }
+}
+
+test("a positive refill linked to the complete ticket number confirms reset even after those credits were spent", async () => {
+  const { seen, ticket } = receiptFixture((row) => [row])
+  const result = await usage(withJwt)
+  expect(result.windows[0].display).toContain("-25 / 12000")
+  expect(result.windows[0].display).toContain("今日已重置（+12484 积分）")
+  expect(result.windows[0].display).not.toContain("工单已关闭")
+  const req = seen.find((r) => new URL(r.url).pathname === "/api/credits/history")
+  const url = new URL(req.url)
+  expect(url.origin).toBe("https://gaccode.com")
+  expect(url.searchParams.get("startTime")).toBe(ticket.createdAt)
+  expect(req.headers.get("authorization")).toBe("Bearer fake-site-jwt")
+  expect(seen.every((r) => r.method === "GET")).toBe(true)
+})
+
+for (const [label, change] of [
+  ["hourly refill", { details: "Hourly refill" }],
+  ["different ticket", { details: "Automatic refill via support ticket #4322" }],
+  ["ticket number prefix", { details: "Automatic refill via support ticket #43210" }],
+  ["credit consumption", { reason: "usage" }],
+  ["zero credit", { amount: 0 }],
+  ["negative credit", { amount: -1 }],
+  ["numeric string", { amount: "12484" }],
+  ["different account", { userId: 43 }],
+  ["pre-application record", { createdAt: "2020-01-01T00:00:00Z" }],
+  ["future record", { createdAt: "2099-01-01T00:00:00Z" }],
+]) {
+  test(`${label} cannot prove this ticket was credited`, async () => {
+    receiptFixture((row) => [{ ...row, ...change }])
+    const result = await usage(withJwt)
+    expect(textOf(result)).toContain("今日已申请（工单已关闭）")
+    expect(textOf(result)).not.toContain("今日已重置")
+  })
+}
+
+test("the correlated refill can be found on the second history page", async () => {
+  let receipt
+  const queried = []
+  receiptFixture((row) => { receipt = row; return [] }, (req) => {
+    const page = Number(new URL(req.url).searchParams.get("page"))
+    queried.push(page)
+    const history = page === 1 ? Array.from({ length: 100 }, () => ({ reason: "usage", amount: -1 })) : [receipt]
+    return { history, total: 101, totalPages: 2, currentPage: page, limit: 100 }
+  })
+  expect(textOf(await usage(withJwt))).toContain("今日已重置（+12484 积分）")
+  expect(queried).toEqual([1, 2])
+})
+
+test("a history read failure keeps credits and the application visible without claiming reset", async () => {
+  receiptFixture(() => [], Response.json({}, { status: 503 }))
+  const result = await usage(withJwt)
+  expect(result.error).toBeUndefined()
+  expect(textOf(result)).toContain("-25 / 12000")
+  expect(textOf(result)).toContain("今日已申请")
+  expect(textOf(result)).toContain("积分流水读取失败")
+  expect(textOf(result)).not.toContain("今日已重置")
+})
+
+test("unknown history pagination cannot turn an apparent matching row into a confirmed reset", async () => {
+  let receipt
+  receiptFixture((row) => { receipt = row; return [] }, () => ({ history: [receipt] }))
+  const result = await usage(withJwt)
+  expect(textOf(result)).toContain("积分流水读取失败")
+  expect(textOf(result)).not.toContain("今日已重置")
+})
+
+test("bounded incomplete history keeps the ticket unverified and does not request a sixth page", async () => {
+  const pages = []
+  receiptFixture(() => [], (req) => {
+    const page = Number(new URL(req.url).searchParams.get("page"))
+    pages.push(page)
+    return { history: Array.from({ length: 100 }, () => ({ reason: "usage", amount: -1 })), total: 501, totalPages: 6, currentPage: page, limit: 100 }
+  })
+  const result = await usage(withJwt)
+  expect(pages).toEqual([1, 2, 3, 4, 5])
+  expect(textOf(result)).toContain("积分流水未查全")
+  expect(textOf(result)).not.toContain("今日已重置")
+})
+
+test("website credits, identity and subscription survive an API-key statusline refusal", async () => {
+  const email = "website@example.invalid"
+  const seen = fakeUsage({
+    [statusPath]: Response.json({}, { status: 401 }),
+    [creditPath]: { balance: 3020, creditCap: 12000, creditsPerHour: 300 },
+    "/api/me": { user: { email } },
+    "/api/subscriptions": { subscriptions: [{ planName: "GAC Max", endDate: "2099-01-01T00:00:00Z", autoRenew: true }] },
+    "/api/tickets?page=1&limit=20": { tickets: [{ title: "请求重置积分", createdAt: new Date().toISOString(), status: "CLOSED" }] },
+  })
+  const result = await usage(withJwt)
+  expect(result.error).toBeUndefined()
+  expect(result.user).toBe(email)
+  expect(result.plan).toBe("GAC Max")
+  expect(result.until).toBe("2099-01-01T00:00:00Z")
+  expect(result.renew).toBe("auto")
+  expect(result.windows[0].display).toContain("3020 / 12000 · 300/时")
+  expect(result.windows[0].display).toContain("今日已申请（工单已关闭）")
+  expect(result.windows[0].display).not.toMatch(/网站账户|套餐 GAC Max|选项关闭/)
+  expect(result.balance).toBeUndefined()
+  expect(result.signIn).toBe("kept")
+  expect(seen.every((r) => r.method === "GET")).toBe(true)
+})
+
+test("website balance is not replaced by another API-key account's balance or multiplier", async () => {
+  fakeUsage({
+    [creditPath]: { balance: 20, creditCap: 100, refillRate: 5 },
+    [statusPath]: { balance: 99, creditCap: 100, refillRate: 1, timeMultiplier: { value: 7 }, user: { email: "key@example.invalid" } },
+    "/api/me": { user: { email: "website@example.invalid" } },
+    "/api/subscriptions": { subscriptions: [{ planName: "GAC Max" }] },
+  })
+  const result = await usage(withJwt)
+  expect(result.user).toBe("website@example.invalid")
+  expect(result.plan).toBe("GAC Max")
+  expect(result.windows[0].display).toContain("20 / 100 · 5/时")
+  expect(result.windows[0].display).not.toContain("7x")
+})
+
+test("website credit failure remains visible even if API-key credits and USD are readable", async () => {
+  fakeUsage({ [creditPath]: Response.json({}, { status: 401 }), "/api/usd-account": { account: { balanceUsd: 3 } } })
+  const result = await usage(withJwt)
+  expect(result.error).toMatch(/网站.*401/)
+  expect(result.windows).toEqual([])
+  expect(result.balance).toBeUndefined()
+  expect(result.signIn).toBe("kept")
+})
 
 for (const host of [undefined, "https://relay05.gaccode.com"]) {
   test(`API-key-only usage GETs statusline on ${host ?? "default host"}`, async () => {
@@ -86,8 +230,8 @@ for (const refused of ["status", "website"]) {
       : Object.fromEntries([...sitePaths, "/api/credits/balance"].map((p) => [p, Response.json({ error: "expired site token" }, { status: 401 })])))
     const result = await usage(withJwt)
     expect(result.signIn).toBe("kept")
-    // A readable source error may live beside the account balance or in error.
-    expect(textOf(result)).toMatch(/失败|未获授权|过期|未知|error|unauthori[sz]ed|expired/i)
+    if (refused === "website") expect(textOf(result)).toMatch(/失败|未获授权|过期|未知|error|unauthori[sz]ed|expired/i)
+    else expect(result.error).toBeUndefined()
     globalThis.fetch = async () => Response.json({ id: "fake-inference-success" })
     const loaded = await (await GacCodePlugin({})).auth.loader(async () => withJwt)
     expect((await loaded.fetch("https://gaccode.com/codex/v1/responses", { method: "POST", body: "{}" })).status).toBe(200)
@@ -108,7 +252,7 @@ test("continuous credit refill is an aside, not a fabricated reset window", asyn
 for (const value of [0.8, 5]) {
   test(`current multiplier ${value} comes from status.timeMultiplier.value, not old history`, async () => {
     fakeUsage({ [statusPath]: { balance: 20, creditCap: 100, timeMultiplier: { value } } })
-    const result = await usage(withJwt)
+    const result = await usage()
     expect(textOf(result)).toMatch(new RegExp(`${String(value).replace(".", "\\.")}\\s*(?:x|×|倍)`, "i"))
     expect(textOf(result)).not.toMatch(/7\s*(?:x|×|倍)|obsolete fixture/)
   })
@@ -139,7 +283,10 @@ test("no USD account and no booster packs are left off the card", async () => {
 })
 
 test("rate, multiplier and notes stay in the one display part magpie shows after the count", async () => {
-  fakeUsage({ [statusPath]: { balance: 20, creditCap: 100, refillRate: 5, timeMultiplier: { value: 2 } },
+  const email = "fixture@example.invalid"
+  fakeUsage({ [creditPath]: { balance: 20, creditCap: 100, refillRate: 5 },
+    [statusPath]: { balance: 20, creditCap: 100, timeMultiplier: { value: 2 }, user: { email } },
+    "/api/me": { user: { email } },
     "/api/usd-account": { account: { balanceUsd: 1 } } })
   const result = await usage(withJwt)
   const [count, rest, ...dropped] = result.windows[0].display.split(" · ")
@@ -204,7 +351,7 @@ test("booster summary distinguishes expired, used and available credit without c
   expect(result.display).not.toMatch(/100\s*积分\s*·\s*可用|可用[^；]*100/)
 })
 
-test("balance is the USD amount alone; booster state and application lead the credit line's notes, website identity after", async () => {
+test("balance is the USD amount alone; website identity and plan head the card without repeating in notes", async () => {
   const email = "long-website-fixture@example.invalid"
   const plan = "Fixture Website Plan"
   const pack = { id: 301, comment: "fixture-booster-detail", credits: 9, isUsed: false, expiresAt: "2099-01-01T00:00:00Z" }
@@ -220,14 +367,14 @@ test("balance is the USD amount alone; booster state and application lead the cr
   const balance = result.windows[0].display
   // magpie shows a display's first two " · " parts only
   expect(balance.split(" · ").length).toBe(2)
-  const identity = balance.indexOf(email)
-  expect(identity).toBeGreaterThanOrEqual(0)
+  expect(result.user).toBe(email)
+  expect(result.plan).toBe(plan)
+  expect(balance).not.toContain(email)
   for (const marker of ["加油包", "今日已申请"]) {
     expect(balance.indexOf(marker)).toBeGreaterThanOrEqual(0)
-    expect(balance.indexOf(marker)).toBeLessThan(identity)
   }
   expect(balance).toMatch(/加油包[^；]*可用\s*1/)
-  expect(balance.indexOf(plan)).toBeGreaterThan(identity)
+  expect(balance).not.toContain(plan)
   expect(balance).toContain("工单已关闭")
   expect(balance).not.toMatch(/今日已重置|已到账/)
   const details = _internal.summarizeBoosters({ boosterPacks: [pack] }).display
@@ -266,18 +413,19 @@ for (const [status, label] of [
     } })
     const display = (await usage(withJwt)).windows[0].display
     expect(display).toContain(label)
-    expect(display.indexOf(label)).toBeLessThan(display.indexOf(email))
+    expect(display).not.toContain(email)
     expect(display).not.toMatch(/已到账|今日已重置|审批通过|申请失败/)
   })
 }
 
-test("API-key account identity and refillRate use the verified statusline fields, independently of website identity", async () => {
+test("website credits head the card and a different API-key account is identified separately", async () => {
   fakeUsage({ [statusPath]: { balance: 2, creditCap: 100, refillRate: 5,
     timeMultiplier: { value: 0.8 }, user: { id: 101, email: "key-owner@example.invalid" } },
     "/api/me": { email: "different-website@example.invalid" } })
   const result = await usage(withJwt)
-  expect(result.user).toBe("key-owner@example.invalid")
-  expect(result.windows[0].display).toContain("different-website@example.invalid")
+  expect(result.user).toBe("different-website@example.invalid")
+  expect(result.windows[0].display).toContain("API key 账户 key-owner@example.invalid")
+  expect(result.windows[0].display).not.toContain("different-website@example.invalid")
   expect(result.windows[0].display).toContain("5/时")
   expect(result.signIn).toBe("kept")
 })
@@ -289,16 +437,36 @@ test("a website account matching the key's email names the plan instead of repea
     "/api/subscriptions": { subscriptions: [{ planName: "GAC Max" }] },
     "/api/usd-account": { account: { balanceUsd: 3 } } })
   const result = await usage(withJwt)
-  expect(result.user).toBe(email)
+  expect(result.user.toLowerCase()).toBe(email)
   expect(result.plan).toBe("GAC Max")
   expect(result.balance).toBe("$3")
   expect(result.windows[0].display).not.toContain(email)
 })
 
-test("website identity does not become API-key account identity when statusline fails", async () => {
+test("website identity keeps naming website credits when the optional statusline fails", async () => {
   fakeUsage({ [statusPath]: Response.json({}, { status: 401 }), "/api/me": { email: "website@example.invalid" } })
   const result = await usage(withJwt)
-  expect(result.user).toBeUndefined()
-  expect(result.balance).toContain("website@example.invalid")
+  expect(result.user).toBe("website@example.invalid")
+  expect(result.balance).toBeUndefined()
+  expect(result.error).toBeUndefined()
+  expect(result.windows[0].display).toContain("2 / 100")
   expect(result.signIn).toBe("kept")
+})
+
+test("a rejected credit query cannot turn ticket notes or website USD into a balance that hides the error", async () => {
+  for (const account of [null, { balanceUsd: 3 }]) {
+    fakeUsage({
+      [creditPath]: Response.json({}, { status: 401 }),
+      "/api/me": { user: { email: "website@example.invalid" } },
+      "/api/subscriptions": { subscriptions: [{ planName: "GAC Max" }] },
+      "/api/usd-account": { account },
+      "/api/tickets?page=1&limit=20": { tickets: [{ title: "请求重置积分", createdAt: new Date().toISOString(), status: "CLOSED" }] },
+    })
+    const result = await usage(withJwt)
+    // Magpie renders balance before error when there are no quota windows.
+    expect(result.balance).toBeUndefined()
+    expect(result.windows).toEqual([])
+    expect(result.error).toContain("HTTP 401")
+    expect(result.signIn).toBe("kept")
+  }
 })

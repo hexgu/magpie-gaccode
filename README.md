@@ -1,12 +1,15 @@
 # GACCode for magpie and OpenCode
 
 **Unofficial plugin.** Independently maintained; not reviewed or endorsed by
-magpie, GACCode or OpenCode. Package: `magpie-gaccode`, version **0.1.0**.
+magpie, GACCode or OpenCode. Package: `magpie-gaccode`, version **0.1.1**.
 Provider ID: `gaccode`.
 
 Claude uses Anthropic Messages; Codex uses OpenAI Responses. Quota queries
-are read-only. Automatic refill applications are optional and disabled by
-default. Direct Gemini GenAI is experimental and also disabled by default.
+are read-only. Automatic refill applications are enabled by default;
+set `autoRequestRefill: false` to disable them. An original explicit
+`autoDailyReset` off setting is also respected when no plugin option overrides it.
+Direct Gemini GenAI is experimental; the original Gemini entries remain
+available unless `experimentalGemini` is explicitly set to `false`.
 
 ## Install
 
@@ -61,7 +64,9 @@ magpie stores plugin credentials in
 `~/.config/magpie/plugin-auth.json` (or its XDG config directory).
 OpenCode uses its own authentication store. The website JWT, when supplied,
 is stored in the credential metadata. Obtain it from your signed-in browser
-on gaccode.com; leave it blank to skip the website details.
+on gaccode.com from **DevTools → Application → Local Storage → token**.
+It reads website credits and account details. Without it, the plugin only
+attempts the API-key statusline query for basic credits.
 
 Each request reads the current account's credentials and endpoint. This
 keeps an account on relay05 when another account, or an older cached model
@@ -83,37 +88,43 @@ Claude and Codex IDs come from their public model catalogs:
 | Experimental Gemini | `@ai-sdk/google` | `<account host>/gemini/v1beta` |
 
 Examples: `gaccode/claude-sonnet-5-5`, `gaccode/gpt-5.5`.
-When a required catalog fails, the plugin marks the **whole** list as a
-fallback. magpie may keep its last successful complete list; this is not
-independent refresh of each family. Successful empty catalogs do not add
+When a required Claude/Codex catalog fails, the plugin marks the **whole**
+list as a fallback and magpie may keep its last successful complete list.
+Gemini authentication or catalog failures use its bundled entries without
+discarding readable Claude/Codex catalogs; their internal evidence records
+remain marked as bundled rather than live. Successful empty catalogs do not add
 bundled models. Explicit user model definitions remain listed even when
 their IDs are absent from a live catalog; this is configuration, not proof
 of availability. Duplicate IDs across protocol families cause whole-list
 fallback instead of silently choosing one protocol.
 
 The public catalogs confirm IDs, not token limits, image input, tools or
-reasoning levels. The plugin leaves unconfirmed capabilities unknown. A
-token limit of `0` is magpie's unknown value, not a GACCode limit of zero.
+reasoning levels. Known models preserve the original plugin's configurable
+tools, reasoning, image input, variants and token-budget declarations.
+These bundled defaults are configuration, not endpoint capability guarantees.
+New unknown IDs retain unknown capabilities and budgets. A token limit of
+`0` is magpie's unknown value, not a GACCode limit of zero.
 magpie can fill in limits from its own catalog or models.dev; a displayed
 limit such as `1M` is not confirmation of this GACCode endpoint's limit.
 No uniform credit price or free-model flag is inferred.
 
 Explicit model configuration is preserved in live and fallback lists:
 name, API id, limit, variants, options, headers and provider endpoint.
-If your client needs a token budget or reasoning levels, configure values
+Override bundled token budgets or reasoning levels with values
 you have checked for that model and endpoint. These are your configuration,
 not a server capability guarantee. In magpie this is the OpenCode-shaped
 `config.provider.gaccode.models` in `plugins.json`; in OpenCode it is
 `provider.gaccode.models` in `opencode.json`.
 
 Internal evidence records keep the catalog source, check time, family and
-user-overridden fields separate from capability and authentication claims.
+user-overridden fields and bundled declarations separate from capability and authentication claims.
 Bundled fallback entries have no successful live-check timestamp, and a
 catalog response does not establish inference access. These records are
 not serialized as SDK model fields and do not store credential values.
 
-Unknown tools and reasoning capabilities use `false` in the host's boolean
-fields as an undeclared capability, not an execution-permission boundary.
+Unknown models use `false` for undeclared tools and reasoning capabilities
+in the host's boolean fields. Known models retain the original declarations.
+These fields are not an execution-permission boundary.
 OpenCode 1.18.34 still sends and executes tools with `tool_call:false`;
 control tool execution with the host's agent permissions. After checking
 tool support for your model and endpoint, this magpie configuration declares
@@ -161,14 +172,22 @@ To disable tools in this tested OpenCode version, set the relevant agent's
 
 ## Read-only quota reporting (magpie)
 
-The basic state query follows GACCode's
+With a website JWT, credits retain the original source:
+`GET https://gaccode.com/api/credits/balance` with `Authorization: Bearer <JWT>`.
+The returned balance/cap and `refillRate` (or `creditsPerHour`) describe that
+website account. `/api/me` names the card; `/api/subscriptions` provides its
+plan, end date and renewal setting. None of these depend on API-key statusline
+success, so a statusline 401 does not hide readable website credits.
+
+Without a JWT, the basic query follows GACCode's
 [official statusline plugin](https://gaccode.com/claudecode/install/statusline-plugin):
 `GET <account host>/claudecode/v1/cc-status-line` with `x-api-key`.
-When that response supplies an account email, it identifies the key's
-quota card; a website JWT's email is never substituted for it.
+This card uses only that response's account identity.
 
-It reads the returned credit balance/cap and current
-`timeMultiplier.value`; the multiplier is shown only when it is not 1x.
+When website credits are shown, an optional statusline query can supply
+`timeMultiplier.value` only when its account email matches the website's.
+The credit response's own multiplier is also accepted. Only non-1x values
+are displayed.
 Missing fields or failed queries show unknown/error or are left out; no
 clock schedule or old usage record is used to invent a current multiplier. The time multiplier is only one
 cost factor, so it is not copied into every model's `rate` or `rateWas`.
@@ -179,19 +198,21 @@ An account balance is not the same as an API key's spending allowance;
 CREDIT and USD modes may have different limits. The status endpoint's
 actual permissions and response contract still need a real test account.
 
-With an optional website JWT, the plugin also reads the main site's
+With a website JWT, the plugin also reads the main site's
 `/api/subscriptions`, `/api/me`, `/api/usd-account`,
 `/api/credits/booster-packs` and the first page of `/api/tickets`.
 Website credentials remain on gaccode.com even if inference uses a relay.
 
-When the website email matches the API key's, its plan replaces the card's
-"GACCode" label and the email is not repeated. Otherwise the website email and
-plan are listed after the other website items, since they may belong to a
-different account. The card's balance is the website USD amount alone, a
+The website plan heads the website credit card and its email is not repeated
+in the notes. A readable different API-key identity is listed separately.
+The card's balance is the website USD amount alone, a
 figure like other cards'. The credit line follows the count with the refill
 rate, a non-1x multiplier, booster counts, today's refill ticket and the
 website details, joined by "，" (magpie shows a display up to its second
-" · " part). Without a credit cap they all go in the balance. A missing USD
+" · " part). Without a credit cap they all go in the balance.
+When the credit query fails or its balance is unknown,
+the card shows the query error; website details never replace it as a balance.
+A missing USD
 account, no booster packs and no ticket found are left out. Zero, unreadable
 and unknown states are still shown, and used/expired booster packs are
 labeled as such.
@@ -202,7 +223,19 @@ waiting for the user, or closed; other values are unknown. Closed does not
 mean approved, rejected or credited. Those financial outcomes are not
 inferred from the ticket state.
 
-All quota queries are GETs. The opt-in automatic refill below can create a
+For a matching ticket, the plugin reads `/api/credits/history` between the
+ticket's creation time and a fixed query cutoff. It confirms a reset only
+from a positive numeric `refill` record whose `details` exactly matches the
+observed `Automatic refill via support ticket #<complete ID>` format,
+with a valid `balanceAfter` and timestamp in that interval. A conflicting
+account ID is rejected. The card then shows `今日已重置（+12484 积分）`, for
+example; the current balance need not remain full after subsequent use.
+Hourly refills, other tickets, malformed or unrecognized records never
+confirm it. Lookup is limited to five validated 100-row pages with a shared
+six-second timeout. Failures or incomplete pagination keep the application
+status and show a small history-read notice without hiding readable credits.
+
+All quota queries are GETs. Automatic refill below can create a
 ticket only after an inference error. The plugin never buys or uses booster
 packs, or changes an API key's allowance. A website JWT failure, or
 a status-query 401, leaves the inference account's sign-in state unchanged.
@@ -211,9 +244,9 @@ magpie's own inference-401 handling still applies.
 
 OpenCode ignores magpie's quota hook.
 
-## Optional automatic credit-refill application
+## Automatic credit-refill application
 
-Enable this option to request a credit refill after a managed inference request
+When enabled (the default), request a credit refill after a managed inference request
 reports exhausted credits. The plugin submits a support ticket using your
 website JWT, subject to the account checks and daily deduplication below.
 It displays “已申请”; the credit balance continues to show the latest reading.
@@ -223,7 +256,7 @@ In magpie 0.1.1100, provider rows have no Options button; the native options
 editor is for middleware. Set provider plugin options through the CLI:
 
 ```sh
-magpie plugin options 'github:SadWood/magpie-gaccode' '{"autoRequestRefill":true}'
+magpie plugin options 'github:SadWood/magpie-gaccode' '{"autoRequestRefill":false}'
 ```
 
 If you installed using a different source or pinned ref, use its exact spec from
@@ -231,7 +264,9 @@ If you installed using a different source or pinned ref, use its exact spec from
 object. Set `autoRequestRefill` to `false` to disable automatic applications.
 An isolated preview page may call this CLI, but is not a native provider toggle.
 
-The default is `false`; only boolean `true` enables it. This option requires
+The default is `true`; explicit boolean `false` disables it. Use boolean
+values for this option; other explicitly provided values do not authorize
+requests. Automatic requests require
 `metadata.loginToken` (website JWT) and an existing host-provided `directory`.
 It runs only after a managed GACCode inference POST returns a 402 JSON error
 explicitly saying credits are exhausted, or a 429 JSON error with an explicit
@@ -268,13 +303,21 @@ without the account lock. An interrupted or corrupt ledger is not reclaimed.
 Different host directories do not share local deduplication; server ticket
 checks cannot provide an atomic lock between different directories/machines.
 
-Quota text shows the option state, missing JWT, waiting, application or
-failure. A failed `/me` read shows “网站身份读取失败，暂停申请”, including in a
+An explicit plugin `autoRequestRefill` option takes precedence. If it is
+absent, the original saved `metadata.autoDailyReset` off values (`"off"`,
+`"false"`, `"0"`, or their boolean/numeric equivalents) leave requests disabled;
+otherwise they are enabled by default. They use the persistent checks
+described above after an exhausted-credit inference response.
+
+Quota text shows missing JWT, waiting, application or failure. Disabled
+options and a redundant waiting state beside today's ticket are omitted.
+A failed `/me` read shows “网站身份读取失败，暂停申请”, including in a
 fresh quota process; a 401 also asks to update the JWT. It cannot be displayed
 as waiting to trigger when website identity could not be read. This uses the
 current read result without persisting any key-to-account mapping.
 “已申请” confirms a ticket response only. The plugin does
-not infer approval or credited balance. All checks and requests use a shared
+not infer approval from a ticket state. Correlated credit-history records are
+checked separately during read-only quota refreshes. All request checks use a shared
 12-second deadline; error-body inspection has a 1-second/64-KiB bound. These
 are request bounds, not performance measurements or delivery guarantees.
 
@@ -282,23 +325,24 @@ are request bounds, not performance measurements or delivery guarantees.
 
 The [official Gemini launcher](https://gaccode.com/gemini/install) uses
 Code Assist. It does not establish compatibility with the direct GenAI
-endpoint above. Until authentication, generation, streaming, tools and
-cancellation have been checked against GACCode, enable this only to test it.
+endpoint above. Authentication, generation, streaming, tools and cancellation
+still need endpoint-specific verification. The original model entries remain
+listed; their presence does not establish current account access.
 
-In magpie, use the same CLI options command with your installed plugin spec:
+To explicitly disable Gemini in magpie, use your installed plugin spec:
 
 ```sh
-magpie plugin options '<installed-plugin-spec>' '{"experimentalGemini":true}'
+magpie plugin options '<installed-plugin-spec>' '{"experimentalGemini":false}'
 ```
 
 In OpenCode:
 
 ```json
-{ "plugin": [["file:///absolute/path/to/magpie-gaccode/index.mjs", { "experimentalGemini": true }]] }
+{ "plugin": [["file:///absolute/path/to/magpie-gaccode/index.mjs", { "experimentalGemini": false }]] }
 ```
 
-The four bundled experimental IDs are listed in GACCode's installation
-guide. Their names do not prove current account access or protocol support.
+The five bundled experimental IDs preserve the original plugin's model
+configuration. Their names do not prove current account access or protocol support.
 Old cached Gemini entries cannot send managed requests with the experiment
 off; explicitly configured custom endpoints remain user configuration.
 
@@ -325,7 +369,8 @@ one existing key, short synthetic prompts and outputs capped at 128 tokens:
 The Claude endpoint also rejected forced `tool_choice` with HTTP 400,
 instructing use of `auto` or `none`. The plugin preserves upstream tool names
 and errors; it does not guess aliases or silently change tool-choice semantics.
-Unknown tool capabilities remain unconfirmed by default.
+Bundled tool declarations remain configuration defaults rather than guarantees
+of reliable first-call behavior.
 
 These are bounded checks for two models, one key and the host versions above,
 not a guarantee for every account or model. Client abort does not establish
@@ -337,19 +382,19 @@ This is an independent public repository, not a magpie-community package.
 The `magpie-plugin` GitHub topic enables unofficial discovery; it does not
 mean that magpie has audited the code. npm publication is not required.
 
-Run `bun test` from the repository root. The 223 offline tests cover the
+Run `bun test` from the repository root. The offline tests cover the
 provider and automatic refill behavior, including account identity,
 persistent cross-process deduplication and keeping quota reads read-only.
 
 ## 中文速览
 
-- API key 用于推理及基础积分查询；网站 JWT 用于可选扩展信息和显式开启的自动申请。
+- 网站 JWT 按原版方式读取网站积分、账号和套餐；API key 用于推理，无 JWT 时也可尝试基础积分查询。
 - 本仓库为非官方插件，未获 magpie / GACCode 审核或背书；从 GitHub 安装，尚未发布 npm。
-- `autoRequestRefill` 默认关闭；开启后仅在托管推理明确积分耗尽时申请一次工单，显示“已申请”；实际积分以最新余额为准。额度查询保持 GET-only。
+- `autoRequestRefill` 默认开启；显式设为 `false` 可关闭，未设置时仍保留旧配置的关闭状态。仅在托管推理明确积分耗尽时申请一次工单。额度刷新只读匹配对应工单的补充流水，确认后显示“今日已重置（+积分）”。
 - 不保存网站密码，不购买或使用加油包。
 - 网站余额与 API key 消费额度分别看待；额度读取失败不会停用推理。
-- relay 按账号选择；模型能力未确认时显示未知，保留用户显式配置。
-- Gemini 默认关闭，启用 `experimentalGemini` 只表示接受实验性直接 GenAI 路径。
+- relay 按账号选择；已知模型沿用原版配置声明，未知模型保持未知，用户显式配置优先。
+- Gemini 原版列表默认保留；`experimentalGemini:false` 可关闭，实际直接 GenAI 能力仍需核验。
 - 独立 Magpie/OpenCode 已完成有限主站真实链路测试。Magpie 两族工具往返及 Claude 客户端取消通过；OpenCode Codex 直接通过，Claude 有首轮工具名大小写错误后恢复成功的限制；强制工具选择不受该 Claude 端点支持。relay、其他模型及计费停止仍未证实。
 - OpenCode 1.18.34 CLI 已用本地替身验收；动态目录未调用，工具权限须通过 Agent 权限控制。
 

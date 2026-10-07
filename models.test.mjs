@@ -33,8 +33,18 @@ function catalog(replies = {}) {
   return seen
 }
 
-test("default config excludes unverified Gemini", async () => {
-  const { provider } = await given()
+test("default config preserves the original Gemini entries and known-model declarations", async () => {
+  const { provider } = await given({})
+  expect(provider.models["gemini-2.5-flash"]).toBeDefined()
+  expect(provider.models["gpt-5.5"]).toMatchObject({
+    tool_call: true, reasoning: true, attachment: true,
+    limit: { context: 400000, output: 128000 },
+  })
+  expect(provider.models["claude-sonnet-5-5"].variants.high).toEqual({})
+})
+
+test("an explicit Gemini opt-out remains respected", async () => {
+  const { provider } = await given({ experimentalGemini: false })
   expect(Object.keys(provider.models).some((id) => id.startsWith("gemini-"))).toBe(false)
 })
 
@@ -63,7 +73,7 @@ for (const account of [undefined, { type: "api", metadata: {} }, auth]) {
   })
 }
 
-test("Gemini GenAI catalog requires the explicit experimental option and fake key", async () => {
+test("enabled Gemini GenAI catalog uses its protocol and fake key", async () => {
   const { hooks, provider } = await given({ experimentalGemini: true })
   const seen = catalog()
   const models = await hooks.provider.models(provider, { auth })
@@ -78,11 +88,12 @@ test("experimental Gemini is not probed without a key", async () => {
   const seen = catalog()
   const models = await hooks.provider.models(provider, { auth: undefined })
   expect(seen.some((r) => new URL(r.url).pathname.startsWith("/gemini/"))).toBe(false)
-  // An unavailable enabled family must not masquerade as a complete live snapshot.
-  expect(models[FELL_BACK]).toBe(true)
+  expect(models[FELL_BACK]).toBeUndefined()
+  expect(models["gpt-5.5"]).toBeDefined()
+  expect(_internal.modelEvidence(models["gemini-3-flash"]).source).toBe("bundled-catalog")
 })
 
-for (const path of ["/claudecode/v1/models", "/codex/v1/models", "/gemini/v1beta/models"]) {
+for (const path of ["/claudecode/v1/models", "/codex/v1/models"]) {
   test(`failure of enabled family ${path} falls back as a whole, without partial live rows`, async () => {
     const { hooks, provider } = await given({ experimentalGemini: true })
     catalog({
@@ -119,12 +130,15 @@ test("successful empty experimental Gemini is not replaced with static Gemini ro
   expect(models[FELL_BACK]).toBeUndefined()
 })
 
-test("Gemini authentication refusal triggers whole-table fallback", async () => {
+test("Gemini authentication refusal preserves live Claude/Codex rows and marks only Gemini as bundled", async () => {
   const { hooks, provider } = await given({ experimentalGemini: true })
   catalog({ "/gemini/v1beta/models": Response.json({ error: "fake key refused" }, { status: 401 }) })
   const models = await hooks.provider.models(provider, { auth })
-  expect(models[FELL_BACK]).toBe(true)
-  expect(Object.keys(models).sort()).toEqual(Object.keys(provider.models).sort())
+  expect(models[FELL_BACK]).toBeUndefined()
+  expect(models["gpt-5.5"]).toBeDefined()
+  expect(models["claude-sonnet-5-5"]).toBeDefined()
+  expect(_internal.modelEvidence(models["gpt-5.5"]).catalogPresent).toBe(true)
+  expect(_internal.modelEvidence(models["gemini-3-flash"])).toMatchObject({ source: "bundled-catalog", checkedAt: null, catalogPresent: null })
 })
 
 test("all successful empty catalogs do not silently manufacture models", async () => {
@@ -175,19 +189,17 @@ for (const live of [true, false]) {
     const models = await hooks.provider.models(provider, { auth })
     const m = models["gpt-5.5"]
     expect(m.api?.id ?? m.id).toBe("fake-wire-model-id")
-    expect(m.limit).toMatchObject({ context: 0, input: 321, output: 123 })
+    expect(m.limit).toMatchObject({ context: 400000, input: 321, output: 123 })
     expect(m.options).toEqual({ reasoningEffort: "low" })
   })
 }
 
-test("known ID-only defaults also have unknown budgets and do not invent reasoning tiers", async () => {
+test("the original Haiku declaration does not acquire reasoning tiers", async () => {
   const { provider } = await given()
-  for (const m of Object.values(provider.models)) {
-    expect(m.limit).toEqual({ context: 0, output: 0 })
-    expect(m.reasoning ?? false).toBe(false)
-    expect(m.modalities?.input?.includes("image") ?? false).toBe(false)
-    expect(Object.keys(m.variants ?? {})).toEqual([])
-  }
+  const m = provider.models["claude-haiku-4-5"]
+  expect(m.reasoning).toBe(false)
+  expect(m.tool_call).toBe(true)
+  expect(Object.keys(m.variants)).toEqual([])
 })
 
 for (const live of [true, false]) {
@@ -216,7 +228,7 @@ test("model evidence separates live catalog facts from user capability declarati
   expect(live.source).toBe("https://relay05.gaccode.com/claudecode/v1/models")
   expect(Number.isFinite(Date.parse(live.checkedAt))).toBe(true)
   expect(live.capabilities.toolCall).toBe("user-configured")
-  expect(live.capabilities.reasoning).toBe("unknown")
+  expect(live.capabilities.reasoning).toBe("bundled-default")
   expect(JSON.stringify(live)).not.toContain("fake-user-secret")
   expect(JSON.stringify(models)).not.toContain("checkedAt")
   expect(_internal.modelEvidence(models["gpt-5.6-sol"])).toMatchObject({
@@ -242,7 +254,7 @@ test("duplicate IDs across protocol catalogs cause whole fallback instead of cho
 })
 
 test("disabled explicit models stay excluded and disabled Gemini requires an explicit endpoint", async () => {
-  const { hooks, provider } = await given({}, {
+  const { hooks, provider } = await given({ experimentalGemini: false }, {
     "claude-sonnet-5-5": { disabled: true }, "gemini-3-flash": { name: "Off experiment" },
     "gemini-2.5-pro": { provider: { api: "https://custom.example.invalid/gemini" } },
   })

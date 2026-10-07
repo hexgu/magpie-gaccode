@@ -46,6 +46,7 @@ function mock(replies = {}, inference = refused) {
     }
     const defaults = {
       [statusPath]: { email, userId: 42, balance: 0, creditCap: 100 },
+      "/api/credits/balance": { balance: 0, creditCap: 100, refillRate: 5 },
       "/api/me": { user: { id: 42, email } },
       "/api/tickets/categories": { categories: [{ id: 9, key: "REQUEST_TO_REFILL_CREDIT" }] },
       "/api/tickets/recaptcha-required": { requiresRecaptcha: false },
@@ -72,14 +73,40 @@ async function setup({ directory, options = { autoRequestRefill: true }, current
   return { hooks, send: (url = inferenceUrl, init = { method: "POST", body: "{}" }) => loaded.fetch(url, init) }
 }
 
-for (const option of [undefined, false, "true", 1]) {
+for (const option of [false, "true", 1]) {
   test(`autoRequestRefill ${String(option)} is off and makes no side-effect reads`, async () => {
     const fixture = mock()
     const { send, hooks } = await setup({ directory: await temp(), options: { autoRequestRefill: option } })
     expect(await send()).toBe(fixture.responses[0])
     expect(fixture.seen.length).toBe(1)
-    expect(usageText(await hooks.auth.usage(async () => auth))).toContain("自动申请：选项关闭")
+    expect(usageText(await hooks.auth.usage(async () => auth))).not.toContain("自动申请：")
     expect(fixture.posts()).toHaveLength(0)
+  })
+}
+
+for (const options of [{}, { autoRequestRefill: undefined }]) {
+  test(`automatic refill is enabled by default with options ${JSON.stringify(options)}`, async () => {
+    const fixture = mock()
+    const { send } = await setup({ directory: await temp(), options })
+    await send()
+    expect(fixture.posts()).toHaveLength(1)
+    await send()
+    expect(fixture.posts()).toHaveLength(1)
+  })
+}
+
+for (const [legacy, options, requested] of [
+  ["on", {}, true], ["off", {}, false],
+  [false, {}, false], ["false", {}, false], [0, {}, false],
+  ["on", { autoRequestRefill: false }, false],
+  ["off", { autoRequestRefill: true }, true],
+]) {
+  test(`legacy autoDailyReset=${legacy} remains usable with options ${JSON.stringify(options)}`, async () => {
+    const fixture = mock()
+    const current = { ...auth, metadata: { ...auth.metadata, autoDailyReset: legacy } }
+    const { send } = await setup({ directory: await temp(), options, current })
+    await send()
+    expect(fixture.posts()).toHaveLength(requested ? 1 : 0)
   })
 }
 
@@ -387,7 +414,7 @@ for (const ticket of [closedTicket(1, new Date().toISOString()), { ...closedTick
     const { send, hooks } = await setup({ directory: await temp() })
     await send()
     expect(fixture.posts()).toHaveLength(0)
-    expect(usageText(await hooks.auth.usage(async () => auth))).toContain("已有同日申请或待处理工单")
+    expect(usageText(await hooks.auth.usage(async () => auth))).toContain(ticket.status === "CLOSED" ? "今日已申请" : "已有同日申请或待处理工单")
   })
 }
 

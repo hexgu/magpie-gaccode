@@ -1,4 +1,4 @@
-// Opt-in ticket requests. Quota reads never enter this module's write path.
+// Ticket requests. Quota reads never enter this module's write path.
 import { createHash } from "node:crypto"
 import { constants } from "node:fs"
 import { lstat, mkdir, open, readFile } from "node:fs/promises"
@@ -108,7 +108,7 @@ async function existingTicket(token, signal, categoryId, day) {
 }
 
 function statusText(record) {
-  if (!record) return "待触发（仅积分耗尽时申请）"
+  if (!record) return "待触发"
   if (record.status === "submitted") return "已申请"
   if (record.status === "existing") return "已有同日申请或待处理工单"
   if (record.status === "attempt") return "申请结果未知，今日不重试"
@@ -117,6 +117,7 @@ function statusText(record) {
 }
 
 export function createAutoRefill({ enabled = false, directory, now = Date.now } = {}) {
+  const enabledFor = (auth) => typeof enabled === "function" ? enabled(auth) : enabled
   const root = typeof directory === "string" && isAbsolute(directory) ? join(directory, ".gaccode-refill") : null
   const seen = new Map()
   const keyOf = (auth) => hash(`${auth?.key ?? ""}\0${tokenOf(auth)}`)
@@ -139,7 +140,7 @@ export function createAutoRefill({ enabled = false, directory, now = Date.now } 
   }
 
   async function observe(auth, response, statusUrl) {
-    if (!enabled || !await exhaustedCredits(response)) return
+    if (!enabledFor(auth) || !await exhaustedCredits(response)) return
     const day = beijingDay(now())
     const key = keyOf(auth)
     if (seen.get(key)?.day === day) return
@@ -218,7 +219,7 @@ export function createAutoRefill({ enabled = false, directory, now = Date.now } 
 
   async function text(auth, meResult) {
     const prefix = "自动申请："
-    if (!enabled) return prefix + "选项关闭"
+    if (!enabledFor(auth)) return prefix + "选项关闭"
     if (!tokenOf(auth)) return prefix + "需网站 JWT（metadata.loginToken）"
     if (meResult?.status === "rejected") return prefix + "网站身份读取失败，暂停申请" +
       (meResult.reason?.status === 401 ? "，请更新 JWT" : "")
