@@ -1,0 +1,7 @@
+node_modules/
+*.tgz
+.env
+.env.*
+.DS_Store
+.gaccode-refill/
+coverage/

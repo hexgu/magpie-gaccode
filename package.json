@@ -1,0 +1,41 @@
+{
+  "name": "magpie-gaccode",
+  "version": "0.1.0",
+  "description": "Unofficial GACCode provider for magpie and OpenCode, with read-only quota and optional automatic refill requests",
+  "type": "module",
+  "main": "./index.mjs",
+  "exports": "./index.mjs",
+  "files": [
+    "index.mjs",
+    "refill.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "magpie",
+    "gaccode",
+    "claude",
+    "codex",
+    "gemini",
+    "provider",
+    "magpie-plugin"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SadWood/magpie-gaccode.git"
+  },
+  "magpie": {
+    "maxConcurrency": 4,
+    "icon": "https://gaccode.com/favicon.png"
+  },
+  "homepage": "https://github.com/SadWood/magpie-gaccode#readme",
+  "bugs": {
+    "url": "https://github.com/SadWood/magpie-gaccode/issues"
+  },
+  "scripts": {
+    "test": "bun test"
+  }
+}
