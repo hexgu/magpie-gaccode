@@ -410,6 +410,17 @@ function sourceError(result) {
   return e?.status === 401 ? "网站凭证未获授权" : e?.message ?? "读取失败"
 }
 
+function creditWindow(body, name, aside) {
+  const balance = finiteNumber(body?.balance)
+  const cap = finiteNumber(body?.creditCap)
+  if (balance === null || cap === null || cap <= 0) return null
+  // 补充基准不是累计消费上限；比例只表示当前余额缺口。
+  const percent = (1 - balance / cap) * 100
+  if (!Number.isFinite(percent)) return null
+  const used = Math.max(0, Math.min(100, percent))
+  return { name, used, display: `${balance} 积分（补充基准 ${cap} 积分）`, aside }
+}
+
 async function buildUsage(auth, refill) {
   const token = loginTokenOf(auth)
   // Website credentials stay on the website; choosing an inference relay
@@ -426,9 +437,7 @@ async function buildUsage(auth, refill) {
     ] : []),
   ])
   const out = { plan: "GACCode", windows: [], signIn: "kept" }
-  const balanceLines = []
   const notes = []
-  let money = ""
   let appliedToday = false
   const status = settled[0]
   const keyStatus = token ? settled[6] : status
@@ -439,25 +448,29 @@ async function buildUsage(auth, refill) {
   const sameAccount = !!websiteAccount && websiteAccount.toLowerCase() === keyAccount.toLowerCase()
   if (status.status === "fulfilled") {
     const balance = finiteNumber(status.value?.balance)
-    const cap = finiteNumber(status.value?.creditCap)
     const mult = finiteNumber(status.value?.timeMultiplier?.value ??
       (sameAccount ? keyStatus.value?.timeMultiplier?.value : undefined))
     if (balance === null) {
       out.error = `${token ? "网站积分" : "积分状态"}未提供有效余额`
     } else {
-      const count = cap !== null && cap > 0 ? `${balance} / ${cap}` : `${balance} 积分`
       const refillRate = finiteNumber(status.value?.refillRate ?? status.value?.creditsPerHour)
-      if (refillRate !== null) notes.push(`${refillRate}/时`)
+      const balanceTelemetry = { amount: balance, unit: "积分", kind: "replenishing" }
+      if (refillRate !== null && refillRate >= 0) {
+        balanceTelemetry.refillPerHour = refillRate
+        notes.push(`${refillRate}/时`)
+      }
+      out.balance = `${balance} 积分`
+      out.balanceTelemetry = balanceTelemetry
       // 1x is the normal rate; a missing multiplier is left out, never guessed.
       if (mult !== null && mult > 0 && mult !== 1) notes.push(`时段 ${mult}x`)
-      if (cap !== null && cap > 0) {
-        out.windows.push({
-          name: "积分", used: Math.max(0, 100 * (cap - balance) / cap),
-          display: count, aside: true,
-        })
-      } else {
-        balanceLines.push(count)
+      // 路由只读 API key 的状态，网站余额和支付余额各自保留来源。
+      if (token && !sameAccount) {
+        const website = creditWindow(status.value, "网站积分", true)
+        if (website) out.windows.push(website)
       }
+      const keyCredit = keyStatus?.status === "fulfilled" ? creditWindow(keyStatus.value, "积分余量", false) : null
+      if (keyCredit) out.windows.push(keyCredit)
+      if (!out.windows.some((w) => !w.aside)) notes.push("路由用量未知")
     }
   } else {
     out.error = `${token ? "网站积分" : "积分状态"}读取失败（${status.reason?.message ?? "未知错误"}）`
@@ -483,7 +496,7 @@ async function buildUsage(auth, refill) {
     if (me.status === "rejected") details.push(`网站账户读取失败（${sourceError(me)}）`)
     const usd = usdResult.status === "fulfilled" ? extractUsd(usdResult.value) : null
     if (!usd) notes.push(`USD 读取失败（${sourceError(usdResult)}）`)
-    else if (usd.status === "ok") money = usd.display
+    else if (usd.status === "ok") notes.push(`USD ${usd.display}`)
     else if (usd.status !== "no_account") notes.push(`USD ${usd.display}`)
     const boost = packs.status === "fulfilled"
       ? summarizeBoosters(packs.value)
@@ -505,21 +518,18 @@ async function buildUsage(auth, refill) {
   // details hide a failed credit query behind a large balance figure.
   const autoNote = refill ? await refill.text(auth, settled[2]) : ""
   if (out.error) {
+    delete out.balance
+    delete out.balanceTelemetry
     if (autoNote && !["自动申请：选项关闭", "自动申请：待触发"].includes(autoNote)) out.error += `；${autoNote}`
     return out
   }
-  // magpie shows balance as one large figure, and a window's display only up
-  // to its second " · " part: with a credit cap, notes belong in that part.
+  // 原生界面用“ · ”分隔计数和百分比，附注放在计数内，避免挤掉百分比。
   if (autoNote && autoNote !== "自动申请：选项关闭" &&
       !(appliedToday && ["自动申请：待触发", "自动申请：已申请", "自动申请：已有同日申请或待处理工单"].includes(autoNote))) notes.push(autoNote)
   const credit = out.windows[0]
   if (credit) {
-    if (notes.length) credit.display += " · " + notes.join("，")
-    if (money) out.balance = money
-  } else {
-    const lines = [...balanceLines, money, ...notes].filter(Boolean)
-    if (lines.length) out.balance = lines.join(" · ")
-  }
+    if (notes.length) credit.display += "（" + notes.join("，") + "）"
+  } else if (notes.length) out.balance += "（" + notes.join("，") + "）"
   return out
 }
 

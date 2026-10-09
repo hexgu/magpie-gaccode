@@ -1,7 +1,7 @@
 # GACCode for magpie and OpenCode
 
 **Unofficial plugin.** Independently maintained; not reviewed or endorsed by
-magpie, GACCode or OpenCode. Package: `magpie-gaccode`, version **0.1.1**.
+magpie, GACCode or OpenCode. Package: `magpie-gaccode`, version **0.1.2**.
 Provider ID: `gaccode`.
 
 Claude uses Anthropic Messages; Codex uses OpenAI Responses. Quota queries
@@ -170,6 +170,90 @@ To disable tools in this tested OpenCode version, set the relevant agent's
 `permission` to `"deny"`. The local request then contains no tools. A model's
 `tool_call:false` alone does not provide that guarantee.
 
+## 持续补充的积分余额与路由（Magpie）
+
+GACCode 没有 Codex 那样的固定重置周期。卡片主余额显示实测剩余积分，
+奖励余额超过补充基准、零余额和负余额都保留原值。USD 余额另列附注，
+不会替代积分余额。插件不按套餐名称硬编码价格、初始积分或补充速率。
+`creditCap` 在这里称作“补充基准”，不是累计消费上限。
+
+### 原版百分比走势与可选绝对余额走势
+
+官方原版已支持 `windows` 的百分比历史、原生走势和智能路由。
+有效窗口不需要 `span`、`resetsAt` 或其他重置字段即可接入；
+使用本插件的普通窗口协议即可启用这些功能，无须安装宿主兼容补丁。
+原版历史记录的是裁剪到 0..100 的剩余比例 `100 - used`，
+不是绝对积分余额。余额为 22000、补充基准为 12000 时，路由缺口为 0%，
+走势剩余比例为 100%，无法保留这组超额数值的细节；零余额与负余额
+的剩余比例均为 0%，负值也不能保留在百分比曲线中。
+
+插件返回可选的 `balanceTelemetry`：`amount` 是实测余额，`unit` 是“积分”，
+`kind` 是 `replenishing`，`refillPerHour` 仅在接口提供有效非负补充速率时存在。
+官方基准插件宿主不接收这个扩展，插件读取路径也没有接入传统 API 的
+绝对余额历史。因此，需要绝对积分余额走势和预计用完时间时，才需选择
+宿主兼容补丁。补丁见
+`compat/magpie-balance-telemetry.patch`，集成说明见 `compat/README.md`。
+它复用官方传统 API 的余额记录、折线、主题、范围选择和点击放大。
+未安装补丁时，余额文本、查询状态、原版百分比走势和积分余量路由仍可使用。
+
+### 预计用完时间（可选宿主补丁）
+
+兼容补丁保留预计用完时间实现，使用最近一次余额上涨后、
+近期连续读数的净下降速度。
+至少需要 3 个有效读数，首尾跨度至少 1 小时；余额持平、增长或样本不足
+时不显示预测。小时补充已反映在实际余额内，不再额外加减补充速率。
+每日恢复、邀请奖励或其他余额上涨后重新取样，避免沿用补充前的预测。
+预测是近期净余额变化的提示，不保证未来消耗速度不变，也不参与路由。
+余额下降不等于总消费，期间的补充、奖励和其他余额变化都会影响净变化。
+绝对余额历史从接入补丁后的有效读数开始积累，
+不能从已有百分比历史还原未记录的绝对余额。
+
+### 智能路由
+
+路由始终使用 API key 状态接口的实测余额和补充基准；网站 JWT 的余额
+不替代 key 的余额，即使两边邮箱一致。网站与 key 不同或身份未知时，
+网站信息窗口使用 `aside: true`，独立的“积分余量”窗口参与路由。
+路由窗口名称保持稳定，身份接口暂时缺少邮箱不会拆开额度恢复记录。
+
+Magpie 当前按 `used` 比例选择账户。插件的普通窗口实现使用
+`clamp((1 - balance / creditCap) * 100, 0, 100)` 表示当前余额相对补充基准的缺口，
+**不表示累计消费比例**。余额恢复会降低该数值；奖励余额超过基准时为 0%，
+零或负余额为 100%。缺少有效余额、基准或非有限比例时不创建路由窗口，
+显示“路由用量未知”。未知读数仍由 Magpie 的原生未知额度策略处理。
+
+不生成 `span`、`resetsAt`、每小时重置倒计时或月度消费额度。
+不把每日可申请恢复机会视作已经到账，也不将 USD、加油包或申请状态
+转换为可用积分。附注使用括号，保留原生界面追加百分比的位置。
+实现依据为 [Magpie 插件文档](https://usemagpie.ai/docs/plugins#usage)
+和 [官方源码](https://github.com/yetone/magpie/tree/e66fa165930ff0693d1ee8065727c29c7631d8f4)。
+
+### WorkBuddy 参考与消费统计边界
+
+参考版本为 `magpie-community` 提交
+`d21d10f0da63992c03c62f9e412ab4c3503f55ef` 的
+`packages/workbuddy/index.mjs`。其 `_internal.usageOf` 汇总各套餐的
+`CycleUsedCapacity` 和 `CycleTotalCapacity`，分别返回窗口的 `amount` 和
+`limit`，并用 `unit: "credits"` 标注单位；`used` 为已用量占周期总量的百分比。
+这些字段有周期消费来源。
+
+GACCode 的 `creditCap` 是补充基准，`used` 是相对该基准的余额缺口。
+不能机械添加 WorkBuddy 的 `amount/limit/unit`，将余额缺口伪装成累计消费。
+可选 `balanceTelemetry.amount` 表示实测剩余余额，与窗口消费字段含义不同。
+官方基准的 `credits_daily` 仅适用于 WorkBuddy Provider，不支持 `gaccode`；
+普通窗口接入不会自动产生 GACCode 的每日消费统计或绝对余额预测。
+
+未修改官方 JS 宿主的普通协议复验已实跑通过，共 9 次插件调用：
+7 次 API key 余额序列、1 次网站 JWT / key 来源隔离、1 次 key 路由用量未知。
+官方 `host.js` 丢弃结构化余额扩展，但完整保留普通路由窗口；
+窗口无需重置字段，也未虚构 `amount/limit` 消费数据。
+复验使用合成响应与隔离 HOME，命令如下，不安装兼容补丁：
+
+```sh
+bun --no-env-file run compat/verify-native.mjs /absolute/path/to/unmodified/magpie
+```
+
+实际结果、来源及历史验证记录见 `compat/VERIFICATION.md`。
+
 ## Read-only quota reporting (magpie)
 
 With a website JWT, credits retain the original source:
@@ -192,11 +276,8 @@ Missing fields or failed queries show unknown/error or are left out; no
 clock schedule or old usage record is used to invent a current multiplier. The time multiplier is only one
 cost factor, so it is not copied into every model's `rate` or `rateWas`.
 
-Any credit progress bar is informational (`aside: true`). There is no
-invented hourly reset countdown or automatic account stop based on it.
-An account balance is not the same as an API key's spending allowance;
-CREDIT and USD modes may have different limits. The status endpoint's
-actual permissions and response contract still need a real test account.
+积分窗口是否参与路由及其账户边界见“持续补充的积分余额与路由”。
+不推断 API key 的单独消费限额或 CREDIT / USD 模式之间的支付切换。
 
 With a website JWT, the plugin also reads the main site's
 `/api/subscriptions`, `/api/me`, `/api/usd-account`,
@@ -205,11 +286,9 @@ Website credentials remain on gaccode.com even if inference uses a relay.
 
 The website plan heads the website credit card and its email is not repeated
 in the notes. A readable different API-key identity is listed separately.
-The card's balance is the website USD amount alone, a
-figure like other cards'. The credit line follows the count with the refill
-rate, a non-1x multiplier, booster counts, today's refill ticket and the
-website details, joined by "，" (magpie shows a display up to its second
-" · " part). Without a credit cap they all go in the balance.
+卡片的余额数值为实测积分，网站 USD 金额放在附注。积分行用括号显示
+补充速度、非 1x 倍率、加油包数量、今日补充工单和账户说明，使用“，”连接。
+“ · ”留给原生百分比。缺少有效补充基准时，这些信息显示在余额文本中。
 When the credit query fails or its balance is unknown,
 the card shows the query error; website details never replace it as a balance.
 A missing USD

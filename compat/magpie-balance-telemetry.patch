@@ -1,0 +1,991 @@
+diff --git a/internal/gui/assets/app.js b/internal/gui/assets/app.js
+index b3aad2f..48c197c 100644
+--- a/internal/gui/assets/app.js
++++ b/internal/gui/assets/app.js
+@@ -13077,6 +13077,8 @@ function renderQuotas() {
+       // in brief: each window's name, figure and bar, when it resets in
+       // its tooltip; the curve and the rest only in full
+       if (brief) meters.classList.add("brief");
++      const replenishing = sub.balanceTelemetry?.kind === "replenishing";
++      if (replenishing && sub.balance && sub.windows?.length && !sub.error) card.append(balanceRow(sub, "实测积分余额，补充和奖励到账后按实际数值更新", false));
+       card.append(meters);
+       // WorkBuddy's, Trae CN's or MiniMax Code's daily check-in, how this account's went,
+       // and the switch for it, on the card rather than only in Settings
+@@ -13088,7 +13090,7 @@ function renderQuotas() {
+       // WorkBuddy's credits, day by day, as magpie counted them (#568)
+       if (!brief && sub.daily && !sub.error) card.append(creditDays(sub));
+       // what is left besides the windows, under them
+-      if (sub.balance && sub.windows?.length && !sub.error) card.append(balanceRow(sub, "What is left on the account besides its windows", false));
++      if (!replenishing && sub.balance && sub.windows?.length && !sub.error) card.append(balanceRow(sub, "What is left on the account besides its windows", false));
+       // the balance over time, and when it runs out at that pace
+       const spend = !brief && !sub.error && balanceCurve(sub);
+       if (spend) card.append(spend);
+@@ -13419,6 +13421,7 @@ function quotaHistOf(sub) {
+ }
+ // the lines of sub's windows, as its card lists them, with points
+ function quotaLines(sub) {
++  if (sub.balanceTelemetry?.kind === "replenishing") return [];
+   const h = quotaHistOf(sub);
+   if (!h) return [];
+   const out = [];
+@@ -13579,6 +13582,8 @@ function curveZoom(box, g) {
+ // balanceAmount: v written as the card's balance writes its amount, "¥"
+ // or "$" before it, "credits" after
+ function balanceAmount(sub, v) {
++  const unit = sub.balanceTelemetry?.unit || sub.balanceTrend?.unit;
++  if (unit) return v.toLocaleString(intlLang(), { maximumSignificantDigits: 21 }) + " " + unit;
+   const n = v.toLocaleString(intlLang(), { minimumFractionDigits: Math.abs(v) < 100 ? 2 : 0, maximumFractionDigits: 2 });
+   // a balance in several currencies ("$11.12 · ¥-0.05"): its trend is the
+   // first currency's, in that currency's sign alone
+@@ -13598,12 +13603,16 @@ function balanceCurve(sub) {
+   const tr = sub.balanceTrend;
+   if (!tr?.points?.length || tr.points.length < 2) return null;
+   const pts = tr.points.map((p) => ({ at: Date.parse(p.at), v: p.amount }));
++  const replenishing = sub.balanceTelemetry?.kind === "replenishing" || tr.kind === "replenishing";
+   const box = el("div", "quota-curve balance-curve");
+   const head = el("div", "qc-head");
+-  const out = tr.runsOut ? Date.parse(tr.runsOut) : null;
++  const latestAmount = sub.balanceTelemetry?.amount ?? pts[pts.length - 1].v;
++  const saidOut = tr.runsOut ? Date.parse(tr.runsOut) : null;
++  const out = sub.balanceTelemetry ? latestAmount > 0 && saidOut > Date.now() ? saidOut : null : saidOut;
+   const pace = el("span", "qc-range");
+   head.append(el("span", "", t("Balance over time")), pace);
+   box.title = t("Solid: the balance as magpie read it. Dashed: a straight line fitted through it since the last top-up, carried on to where it runs out. Click to enlarge.");
++  if (replenishing) box.title = "实线为实测余额；虚线按最近一次余额上涨后的净下降速度拟合，已包含补充。点击放大。";
+   const W = 300, H = 60;
+   const g = sv("svg", { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none", class: "qc-plot", role: "img" });
+   curveZoom(box, g);
+@@ -13616,21 +13625,35 @@ function balanceCurve(sub) {
+   k.append(sw, el("span", "", t("Balance")), el("b", "", balanceAmount(sub, last.v)));
+   k.title = [t("Latest readings:"), ...pts.slice(-8).reverse().map((p) => balanceAmount(sub, p.v) + " · " + quotaTimeText(p.at, Date.now()))].join("\n");
+   legend.append(k);
+-  if (tr.perDay > 0) legend.append(el("span", "qc-key bc-pace", t("about {amount} a day", { amount: balanceAmount(sub, tr.perDay) })));
++  if (tr.perDay > 0) legend.append(el("span", "qc-key bc-pace", replenishing
++    ? "近期每日净下降约 " + balanceAmount(sub, tr.perDay)
++    : t("about {amount} a day", { amount: balanceAmount(sub, tr.perDay) })));
+   box.draw = () => {
+     const now = Date.now();
+     let x0 = quotaRange === "2d" ? now - 48 * 3600e3 : pts[0].at, x1 = now;
+     if (!(x0 < now)) x0 = now - 3600e3;
+     // the dashes reach zero when it is no further off than what is shown
+     if (out && out > now && out - now <= now - x0) x1 = out;
+-    const top = Math.max(...pts.filter((p) => p.at >= x0).map((p) => p.v), last.v, tr.fitStart || 0) * 1.08 || 1;
+-    const X = (at) => ((at - x0) / (x1 - x0)) * W, Y = (v) => H - (Math.max(0, Math.min(top, v)) / top) * H;
++    const values = pts.filter((p, i) => p.at >= x0 || pts[i + 1]?.at >= x0).map((p) => p.v);
++    values.push(last.v, tr.fitStart || 0, tr.fitNow || 0, 0);
++    // 遥测先缩放到有限范围，避免正负极值相减或留白计算溢出。
++    const scale = sub.balanceTelemetry ? Math.max(...values.map((v) => Math.abs(v))) || 1 : 1;
++    const scaled = sub.balanceTelemetry ? values.map((v) => v / scale) : values;
++    const lo = sub.balanceTelemetry ? Math.min(...scaled) : 0;
++    const hi = sub.balanceTelemetry ? Math.max(...scaled) : Math.max(...pts.filter((p) => p.at >= x0).map((p) => p.v), last.v, tr.fitStart || 0);
++    const margin = (hi - lo || 1) * 0.08;
++    const bottom = lo < 0 ? lo - margin : 0;
++    const top = sub.balanceTelemetry ? hi > 0 ? hi + margin : margin : hi * 1.08 || 1;
++    const X = (at) => ((at - x0) / (x1 - x0)) * W;
++    const plotY = (v) => H - ((Math.max(bottom, Math.min(top, v)) - bottom) / (top - bottom)) * H;
++    const Y = (v) => plotY(v / scale);
+     g.replaceChildren();
+     for (const f of [0, 0.5, 1]) g.append(sv("line", { x1: 0, x2: W, y1: H - f * H, y2: H - f * H, class: "qc-grid" }));
++    if (bottom < 0) g.append(sv("line", { x1: 0, x2: W, y1: Y(0), y2: Y(0), class: "qc-even", "aria-label": "零余额" }));
+     if (tr.fitFrom) {
+-      const from = Date.parse(tr.fitFrom), slope = (tr.fitNow - tr.fitStart) / (now - from || 1);
++      const from = Date.parse(tr.fitFrom), slope = (tr.fitNow / scale - tr.fitStart / scale) / (now - from || 1);
+       const end = out && x1 === out ? out : now;
+-      g.append(sv("line", { x1: X(from), y1: Y(tr.fitStart), x2: X(end), y2: Y(tr.fitStart + slope * (end - from)), class: "qc-even bc-fit" }, { stroke: "var(--c1)" }));
++      g.append(sv("line", { x1: X(from), y1: Y(tr.fitStart), x2: X(end), y2: plotY(tr.fitStart / scale + slope * (end - from)), class: "qc-even bc-fit" }, { stroke: "var(--c1)" }));
+     }
+     let d = "";
+     for (let i = 0; i < pts.length; i++) {
+@@ -13640,7 +13663,9 @@ function balanceCurve(sub) {
+     }
+     if (d) g.append(sv("path", { d, class: "qc-line" }, { stroke: "var(--c1)" }));
+     if (x1 > now) g.append(sv("line", { x1: X(now), x2: X(now), y1: 0, y2: H, class: "qc-now" }));
+-    pace.textContent = out ? t("Runs out {in} at this pace", { in: untilText(Math.max(out, now + 60e3)) }) : "";
++    pace.textContent = sub.balanceTelemetry && latestAmount <= 0 ? "当前已耗尽" : out
++      ? replenishing ? "按近期净下降速度，预计 " + untilText(out) + " 用完"
++        : t("Runs out {in} at this pace", { in: untilText(sub.balanceTelemetry ? out : Math.max(out, now + 60e3)) }) : "";
+     pace.title = out ? new Date(out).toLocaleString() : "";
+     g.setAttribute("aria-label", t("Balance over time") + (out ? " · " + pace.textContent : ""));
+     axis.replaceChildren(el("span", "", quotaTimeText(x0, now)), el("span", "", quotaTimeText(x1, now)));
+@@ -14950,22 +14975,32 @@ function quotaWindows(sub) {
+     e.prepend(quotaRefresh(sub));
+     return e;
+   }
+-  const windows = el("div", "quota-windows");
++  const replenishing = sub.balanceTelemetry?.kind === "replenishing";
++  const windows = el("div", "quota-windows" + (replenishing ? " stacked" : ""));
+   for (const w of sub.windows) {
+     const quota = el("div", "quota");
+     const labels = el("div", "quota-labels");
+     // the count and its share in parts, so a count too long for its
+     // window's width goes to a second line at the · rather than cut short
+     const n = el("button", "quota-n");
+-    const [count, share] = quotaText(w).split(" · ");
+-    n.append(el("span", "", share ? count + " ·" : count));
+-    if (share) n.append(" ", el("span", "", share));
+-    n.title = quotaText(w) + "\n" + t(quotaLeft ? "Show how much of each window is used" : "Show how much of each window is left");
+-    n.onclick = () => setQuotaLeft(!quotaLeft);
++    const [balanceCount, ...balanceNotes] = (w.display || "").split(" · ");
++    const deficit = "余额缺口 " + Math.round(Math.max(0, Math.min(100, w.used))) + "%";
++    if (replenishing) {
++      // 百分比独立且优先显示，长余额和基准说明使用原生换行样式。
++      n.append(el("span", "", deficit));
++      if (balanceCount) n.append(" ", el("span", "", balanceCount));
++      if (balanceNotes.length) n.append(" ", el("span", "", balanceNotes.join("，")));
++    } else {
++      const [count, share] = quotaText(w).split(" · ");
++      n.append(el("span", "", share ? count + " ·" : count));
++      if (share) n.append(" ", el("span", "", share));
++    }
++    n.title = replenishing ? (w.display || "") + "\n余额缺口用于路由兼容，不表示累计消费或周期额度" : quotaText(w) + "\n" + t(quotaLeft ? "Show how much of each window is used" : "Show how much of each window is left");
++    if (!replenishing) n.onclick = () => setQuotaLeft(!quotaLeft);
+     labels.append(el("span", "", t(w.name)), n);
+     const track = el("div", "quota-track");
+     const fill = el("i");
+-    fill.style.width = `${quotaFill(w)}%`;
++    fill.style.width = `${replenishing ? Math.max(0, Math.min(100, w.used)) : quotaFill(w)}%`;
+     track.append(fill);
+     quota.append(labels);
+     if (!w.unlimited) quota.append(track);
+@@ -14991,7 +15026,7 @@ function quotaWindows(sub) {
+     if (w.members) quota.title = [quota.title, poolTip(w)].filter(Boolean).join("\n");
+     windows.append(quota);
+   }
+-  quotaFit.observe(windows);
++  if (!replenishing) quotaFit.observe(windows);
+   return windows;
+ }
+ 
+diff --git a/internal/plugin/host.js b/internal/plugin/host.js
+index cda0b1f..debf64d 100644
+--- a/internal/plugin/host.js
++++ b/internal/plugin/host.js
+@@ -1423,6 +1423,7 @@ async function load({ provider, account, proxy }) {
+ //   auth.usage(getAuth, provider) → {
+ //     plan?, user? (the account as the service names it), until?,
+ //     renew?: "auto" | "off", balance?, error?,
++//     balanceTelemetry?: { amount, unit, kind?: "replenishing", refillPerHour? }, // 实测余额
+ //     resets?: { count, until?, byWindow?, fiveHour?, weekly? } (the
+ //       rate-limit resets the account may spend),
+ //     windows?: [{ name, used (percent, 0–100), resetsAt? (ISO or ms),
+@@ -1458,11 +1459,22 @@ async function usageOf(provider, account) {
+   const text = (v) => (typeof v === "string" ? v : "")
+   const num = (v) => (typeof v === "number" && isFinite(v) ? v : 0)
+   const ids = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === "string") : [])
++  const b = u.balanceTelemetry
++  const balanceTelemetry = b && typeof b === "object" &&
++    typeof b.amount === "number" && Number.isFinite(b.amount) &&
++    typeof b.unit === "string" && b.unit.trim() &&
++    (b.kind === undefined || b.kind === "" || b.kind === "replenishing")
++    ? {
++      amount: b.amount, unit: b.unit.trim(), ...(b.kind ? { kind: b.kind } : {}),
++      ...(typeof b.refillPerHour === "number" && Number.isFinite(b.refillPerHour) && b.refillPerHour >= 0
++        ? { refillPerHour: b.refillPerHour } : {}),
++    } : undefined
+   return {
+     plan: text(u.plan),
+     until: when(u.until),
+     renew: u.renew === "auto" || u.renew === "off" ? u.renew : "",
+     balance: text(u.balance),
++    ...(balanceTelemetry ? { balanceTelemetry } : {}),
+     error: text(u.error),
+     user: text(u.user),
+     signIn: ["expired", "kept", "renewed"].includes(u.signIn) ? u.signIn : "",
+diff --git a/internal/plugin/providers.go b/internal/plugin/providers.go
+index 26bfafb..22adeb9 100644
+--- a/internal/plugin/providers.go
++++ b/internal/plugin/providers.go
+@@ -5,6 +5,7 @@ import (
+ 	"encoding/json"
+ 	"errors"
+ 	"fmt"
++	"math"
+ 	"os"
+ 	"path/filepath"
+ 	"slices"
+@@ -811,15 +812,57 @@ func Restore(ctx context.Context, provider, key string, auth map[string]any) err
+ // Usage is how much of its allowance one account has used, as the
+ // plugin's auth.usage tells it (host.js has the shape).
+ type Usage struct {
+-	Plan    string        `json:"plan"`
+-	Until   string        `json:"until"` // RFC 3339, "" when not told
+-	Renew   string        `json:"renew"`
+-	Balance string        `json:"balance"`
+-	Error   string        `json:"error"`
+-	User    string        `json:"user"`
+-	SignIn  string        `json:"signIn"` // "expired", "kept", "renewed" or ""
+-	Windows []UsageWindow `json:"windows"`
+-	Resets  *UsageResets  `json:"resets"`
++	Plan             string            `json:"plan"`
++	Until            string            `json:"until"` // RFC 3339, "" when not told
++	Renew            string            `json:"renew"`
++	Balance          string            `json:"balance"`
++	BalanceTelemetry *BalanceTelemetry `json:"balanceTelemetry,omitempty"`
++	Error            string            `json:"error"`
++	User             string            `json:"user"`
++	SignIn           string            `json:"signIn"` // "expired", "kept", "renewed" or ""
++	Windows          []UsageWindow     `json:"windows"`
++	Resets           *UsageResets      `json:"resets"`
++}
++
++// BalanceTelemetry 是实测剩余余额，与展示文本和路由窗口分开。
++type BalanceTelemetry struct {
++	Amount        *float64 `json:"amount"`
++	Unit          string   `json:"unit"`
++	Kind          string   `json:"kind,omitempty"`
++	RefillPerHour *float64 `json:"refillPerHour,omitempty"`
++}
++
++func (b *BalanceTelemetry) Valid() bool {
++	return b != nil && b.Amount != nil && !math.IsNaN(*b.Amount) && !math.IsInf(*b.Amount, 0) &&
++		strings.TrimSpace(b.Unit) != "" && (b.Kind == "" || b.Kind == "replenishing")
++}
++
++// 可选扩展的格式错误不影响旧 usage，未知余额也不能转换为零。
++func (b *BalanceTelemetry) UnmarshalJSON(data []byte) error {
++	*b = BalanceTelemetry{}
++	var raw struct {
++		Amount        json.RawMessage `json:"amount"`
++		Unit          string          `json:"unit"`
++		Kind          string          `json:"kind"`
++		RefillPerHour json.RawMessage `json:"refillPerHour"`
++	}
++	if json.Unmarshal(data, &raw) != nil {
++		return nil
++	}
++	var amount *float64
++	if json.Unmarshal(raw.Amount, &amount) != nil || amount == nil {
++		return nil
++	}
++	n := BalanceTelemetry{Amount: amount, Unit: strings.TrimSpace(raw.Unit), Kind: raw.Kind}
++	if !n.Valid() {
++		return nil
++	}
++	var rate *float64
++	if json.Unmarshal(raw.RefillPerHour, &rate) == nil && rate != nil && *rate >= 0 && !math.IsNaN(*rate) && !math.IsInf(*rate, 0) {
++		n.RefillPerHour = rate
++	}
++	*b = n
++	return nil
+ }
+ 
+ // UsageResets are the rate-limit resets an account may spend.
+diff --git a/internal/provider/balance_history.go b/internal/provider/balance_history.go
+index da3691a..f729b73 100644
+--- a/internal/provider/balance_history.go
++++ b/internal/provider/balance_history.go
+@@ -34,6 +34,8 @@ const (
+ 	balanceHistKept = 45 * 24 * time.Hour
+ 	balanceHistMax  = 4000
+ 	balanceHistGap  = 5 * time.Minute
++	// 结构化余额逐次采样，容量覆盖每分钟查询的完整保留期及两端读数。
++	balanceTelemetryHistMax = int(balanceHistKept/time.Minute) + 1
+ 	// the points a trend is drawn from, and fitted over
+ 	balanceShowSpan = 14 * 24 * time.Hour
+ 	balanceFitSpan  = 7 * 24 * time.Hour
+@@ -64,6 +66,8 @@ type BalanceTrend struct {
+ 	// Currency is the sign the points are in ("$"), set when the balance
+ 	// is told in several currencies and the points are only the first's
+ 	Currency string `json:"currency,omitempty"`
++	Unit     string `json:"unit,omitempty"`
++	Kind     string `json:"kind,omitempty"`
+ }
+ 
+ // balanceHist is the file: key ("provider|user") → points.
+@@ -116,7 +120,7 @@ func addBalancePoint(pts []BalancePoint, n BalancePoint) []BalancePoint {
+ // under, if it is one to keep: one under the card's key, or, told in
+ // several currencies, one for each under the card's key and the currency.
+ func balancePointsOf(q SubscriptionQuota, now time.Time) map[string]BalancePoint {
+-	if q.Error != "" || q.AsOf != nil || q.Provider == "" || q.Balance == "" || len(q.BalanceParts) > 0 {
++	if q.Error != "" || q.AsOf != nil || q.Provider == "" {
+ 		return nil
+ 	}
+ 	at := now
+@@ -124,6 +128,15 @@ func balancePointsOf(q SubscriptionQuota, now time.Time) map[string]BalancePoint
+ 		at = *q.ReadAt
+ 	}
+ 	at = at.UTC().Truncate(time.Second)
++	if b := q.BalanceTelemetry; b != nil {
++		if !b.Valid() {
++			return nil
++		}
++		return map[string]BalancePoint{telemetryHistKey(q): {At: at, Amount: *b.Amount}}
++	}
++	if q.Balance == "" || len(q.BalanceParts) > 0 {
++		return nil
++	}
+ 	key := quotaHistKey(q.Provider, q.User)
+ 	if cs := balanceCurrencies(q.Balance); cs != nil {
+ 		out := map[string]BalancePoint{}
+@@ -178,6 +191,80 @@ func balanceCurrencies(s string) []currencyAmount {
+ // currencyHistKey is where one currency of a card's balance is kept.
+ func currencyHistKey(key, sign string) string { return key + "|" + strings.TrimSpace(sign) }
+ 
++// 元组避免单位、账户或余额类型变化时拼接到原有曲线。
++func telemetryHistKey(q SubscriptionQuota) string {
++	b := q.BalanceTelemetry
++	key, _ := json.Marshal([]string{q.Provider, strings.ToLower(q.User), strings.TrimSpace(b.Unit), b.Kind})
++	return "telemetry:" + string(key)
++}
++
++// 插件只采结构化余额，不从包含速率、套餐或 USD 的说明文字猜数。
++func notePluginBalanceHistory(qs []SubscriptionQuota, now time.Time) {
++	var selected []SubscriptionQuota
++	var indices []int
++	for i, q := range qs {
++		if q.BalanceTelemetry.Valid() {
++			selected = append(selected, q)
++			indices = append(indices, i)
++		}
++	}
++	if len(selected) == 0 {
++		return
++	}
++	noteBalanceHistory(selected, now)
++	for j, i := range indices {
++		qs[i].BalanceTrend = selected[j].BalanceTrend
++	}
++}
++
++// 返回缓存卡片时只附加曲线，不把缓存读数当作新采样。
++func withPluginBalanceTrends(qs []SubscriptionQuota, now time.Time) {
++	balanceHistMu.Lock()
++	defer balanceHistMu.Unlock()
++	var h balanceHist
++	for i := range qs {
++		if qs[i].From != "" || !qs[i].BalanceTelemetry.Valid() {
++			continue
++		}
++		if h == nil {
++			h = readBalanceHist()
++		}
++		attachBalanceTrend(&qs[i], h, now)
++	}
++}
++
++func attachBalanceTrend(q *SubscriptionQuota, h balanceHist, now time.Time) {
++	key := quotaHistKey(q.Provider, q.User)
++	if b := q.BalanceTelemetry; b != nil {
++		q.BalanceTrend = nil
++		if b.Valid() {
++			q.BalanceTrend = balanceTrend(h[telemetryHistKey(*q)], now)
++			if q.BalanceTrend != nil {
++				q.BalanceTrend.Unit, q.BalanceTrend.Kind = b.Unit, b.Kind
++				tr := q.BalanceTrend
++				finite := func(n float64) bool { return !math.IsNaN(n) && !math.IsInf(n, 0) }
++				points := tr.Points
++				if *b.Amount <= 0 || !finite(tr.FitStart) || !finite(tr.FitNow) || !finite(tr.PerDay) ||
++					len(points) >= 2 && points[len(points)-1].Amount >= points[len(points)-2].Amount {
++					q.BalanceTrend.FitFrom, q.BalanceTrend.RunsOut = nil, nil
++					q.BalanceTrend.FitStart, q.BalanceTrend.FitNow, q.BalanceTrend.PerDay = 0, 0, 0
++				} else if q.BalanceTrend.RunsOut != nil && !q.BalanceTrend.RunsOut.After(now) {
++					q.BalanceTrend.RunsOut = nil
++				}
++			}
++		}
++		return
++	}
++	cs := balanceCurrencies(q.Balance)
++	if cs != nil {
++		key = currencyHistKey(key, cs[0].Sign)
++	}
++	q.BalanceTrend = balanceTrend(h[key], now)
++	if cs != nil && q.BalanceTrend != nil {
++		q.BalanceTrend.Currency = cs[0].Sign
++	}
++}
++
+ // noteBalanceHistory keeps the balance each card among qs tells, and gives
+ // every card with a balance its trend.
+ func noteBalanceHistory(qs []SubscriptionQuota, now time.Time) {
+@@ -204,7 +291,16 @@ func noteBalanceHistory(qs []SubscriptionQuota, now time.Time) {
+ 			if k > 0 {
+ 				last = before[k-1]
+ 			}
+-			after := addBalancePoint(before, p)
++			var after []BalancePoint
++			// 结构化余额保留每次新读数，包括小时补充和透支，不做净下降压缩。
++			if q.BalanceTelemetry.Valid() {
++				after = before
++				if k == 0 || p.At.After(last.At) {
++					after = append(before, p)
++				}
++			} else {
++				after = addBalancePoint(before, p)
++			}
+ 			if len(after) != k || k > 0 && after[k-1] != last {
+ 				changed = true
+ 			}
+@@ -216,8 +312,12 @@ func noteBalanceHistory(qs []SubscriptionQuota, now time.Time) {
+ 		for key, pts := range h {
+ 			i, _ := slices.BinarySearchFunc(pts, cut, func(p BalancePoint, t time.Time) int { return p.At.Compare(t) })
+ 			pts = pts[i:]
+-			if len(pts) > balanceHistMax {
+-				pts = pts[len(pts)-balanceHistMax:]
++			limit := balanceHistMax
++			if strings.HasPrefix(key, "telemetry:") {
++				limit = balanceTelemetryHistMax
++			}
++			if len(pts) > limit {
++				pts = pts[len(pts)-limit:]
+ 			}
+ 			if len(pts) == 0 {
+ 				delete(h, key)
+@@ -228,21 +328,13 @@ func noteBalanceHistory(qs []SubscriptionQuota, now time.Time) {
+ 		writeBalanceHist(h)
+ 	}
+ 	for i, q := range qs {
+-		if q.Balance == "" || len(q.BalanceParts) > 0 {
++		if !q.BalanceTelemetry.Valid() && (q.Balance == "" || len(q.BalanceParts) > 0) {
+ 			continue
+ 		}
+ 		if h == nil {
+ 			h = readBalanceHist()
+ 		}
+-		key := quotaHistKey(q.Provider, q.User)
+-		cs := balanceCurrencies(q.Balance)
+-		if cs != nil {
+-			key = currencyHistKey(key, cs[0].Sign)
+-		}
+-		qs[i].BalanceTrend = balanceTrend(h[key], now)
+-		if cs != nil && qs[i].BalanceTrend != nil {
+-			qs[i].BalanceTrend.Currency = cs[0].Sign
+-		}
++		attachBalanceTrend(&qs[i], h, now)
+ 	}
+ }
+ 
+diff --git a/internal/provider/cards_kept.go b/internal/provider/cards_kept.go
+index a24e691..350e326 100644
+--- a/internal/provider/cards_kept.go
++++ b/internal/provider/cards_kept.go
+@@ -96,7 +96,9 @@ func cardLogins() []Login {
+ func withAccountReadings(cards []SubscriptionQuota) []SubscriptionQuota {
+ 	ls := cardLogins()
+ 	if len(ls) == 0 {
+-		return cards
++		out := slices.Clone(cards)
++		withPluginBalanceTrends(out, time.Now())
++		return out
+ 	}
+ 	read := map[string]SubscriptionQuota{}
+ 	c := &loginUsageCache
+@@ -132,6 +134,7 @@ func withAccountReadings(cards []SubscriptionQuota) []SubscriptionQuota {
+ 		q.Provider, q.Name, q.Icon, q.User = id, f.name, f.icon, l.User
+ 		out = append(out, q)
+ 	}
++	withPluginBalanceTrends(out, time.Now())
+ 	return out
+ }
+ 
+diff --git a/internal/provider/login_usage.go b/internal/provider/login_usage.go
+index 3157600..9181172 100644
+--- a/internal/provider/login_usage.go
++++ b/internal/provider/login_usage.go
+@@ -119,6 +119,7 @@ func loginUsageAt(ctx context.Context, agent string) (map[string]SubscriptionQuo
+ // own note or write.
+ var noteHistory = func(qs []SubscriptionQuota, now time.Time) {
+ 	noteHistoryWrite(qs, now)
++	notePluginBalanceHistory(qs, now)
+ }
+ 
+ // noteHistoryWrite is the history write itself; tests count or hold it.
+diff --git a/internal/provider/plugin_usage.go b/internal/provider/plugin_usage.go
+index ce8ff73..2c7d3db 100644
+--- a/internal/provider/plugin_usage.go
++++ b/internal/provider/plugin_usage.go
+@@ -135,6 +135,10 @@ func quotaOfPlugin(q SubscriptionQuota, u plugin.Usage) SubscriptionQuota {
+ 		q.User = u.User
+ 	}
+ 	q.Balance, q.Renew, q.Error = u.Balance, u.Renew, u.Error
++	q.BalanceTelemetry = nil
++	if u.BalanceTelemetry.Valid() {
++		q.BalanceTelemetry = u.BalanceTelemetry
++	}
+ 	if t, err := time.Parse(time.RFC3339, u.Until); err == nil {
+ 		q.Until = &t
+ 	}
+diff --git a/internal/provider/quota_refresh.go b/internal/provider/quota_refresh.go
+index 7e4b442..4354cd1 100644
+--- a/internal/provider/quota_refresh.go
++++ b/internal/provider/quota_refresh.go
+@@ -113,6 +113,7 @@ func RefreshUsage(ctx context.Context, provider, user string) {
+ 		now := time.Now()
+ 		noteDailyCredits(out, now)
+ 		noteQuotaHistory(out, now)
++		notePluginBalanceHistory(out, now)
+ 		c := &subscriptionUsageCache
+ 		c.Lock()
+ 		c.data = cacheCards(c.data, out, seq, true)
+diff --git a/internal/provider/subscription_usage.go b/internal/provider/subscription_usage.go
+index e997dbf..13272e0 100644
+--- a/internal/provider/subscription_usage.go
++++ b/internal/provider/subscription_usage.go
+@@ -84,14 +84,15 @@ type QuotaWindow struct {
+ // SubscriptionQuota is provider-reported allowance usage. This is separate
+ // from Dial's local token log: vendors expose percentages, not token totals.
+ type SubscriptionQuota struct {
+-	Provider  string        `json:"provider"`
+-	Name      string        `json:"name"`
+-	Icon      string        `json:"icon"`
+-	Plan      string        `json:"plan,omitempty"`
+-	AccessSKU string        `json:"accessSku,omitempty"`
+-	User      string        `json:"user,omitempty"` // the account, so two of one vendor tell apart
+-	Windows   []QuotaWindow `json:"windows"`
+-	Balance   string        `json:"balance,omitempty"` // what is left on an API key, instead of windows
++	Provider         string                   `json:"provider"`
++	Name             string                   `json:"name"`
++	Icon             string                   `json:"icon"`
++	Plan             string                   `json:"plan,omitempty"`
++	AccessSKU        string                   `json:"accessSku,omitempty"`
++	User             string                   `json:"user,omitempty"` // the account, so two of one vendor tell apart
++	Windows          []QuotaWindow            `json:"windows"`
++	Balance          string                   `json:"balance,omitempty"` // what is left on an API key, instead of windows
++	BalanceTelemetry *plugin.BalanceTelemetry `json:"balanceTelemetry,omitempty"`
+ 	// BalanceParts are the Balance's amounts each apart, when the balance
+ 	// field the user wrote has several or a percent (cardParts)
+ 	BalanceParts []BalancePart `json:"balanceParts,omitempty"`
+@@ -191,6 +192,7 @@ func SubscriptionUsage(ctx context.Context) []SubscriptionQuota {
+ 			out := fetchSubscriptionUsage(readCtx)
+ 			noteDailyCredits(out, time.Now())
+ 			noteQuotaHistory(out, time.Now())
++			notePluginBalanceHistory(out, time.Now())
+ 			c.Lock()
+ 			c.data = cacheCards(c.data, out, seq, false)
+ 			c.at, c.pending = time.Now(), nil
+@@ -218,6 +220,7 @@ func SubscriptionUsage(ctx context.Context) []SubscriptionQuota {
+ 	c.Lock()
+ 	out := visibleQuotas(c.data)
+ 	c.Unlock()
++	withPluginBalanceTrends(out, time.Now())
+ 	return withDailyCredits(out, time.Now())
+ }
+ 
+diff --git a/internal/provider/plugin_balance_telemetry_test.go b/internal/provider/plugin_balance_telemetry_test.go
+new file mode 100644
+index 0000000..528eb58
+--- /dev/null
++++ b/internal/provider/plugin_balance_telemetry_test.go
+@@ -0,0 +1,265 @@
++package provider
++
++import (
++	"encoding/json"
++	"math"
++	"os"
++	"path/filepath"
++	"slices"
++	"testing"
++	"time"
++
++	"github.com/yetone/magpie/internal/plugin"
++	"github.com/yetone/magpie/internal/testenv"
++)
++
++func telemetryTestHome(t *testing.T) {
++	t.Helper()
++	home := t.TempDir()
++	testenv.SetHome(t, home)
++	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
++}
++
++func telemetryTestQuota(t *testing.T, value string) SubscriptionQuota {
++	t.Helper()
++	var u plugin.Usage
++	if err := json.Unmarshal([]byte(`{"balance":"300/时，说明12000","balanceTelemetry":`+value+`}`), &u); err != nil {
++		t.Fatal(err)
++	}
++	return quotaOfPlugin(SubscriptionQuota{Provider: "gaccode", User: "website@example.invalid"}, u)
++}
++
++func TestPluginBalanceTelemetryRejectsUnknown(t *testing.T) {
++	telemetryTestHome(t)
++	for _, raw := range []string{`null`, `{}`, `{"amount":null,"unit":"积分"}`, `{"amount":"0","unit":"积分"}`, `{"amount":false,"unit":"积分"}`, `{"amount":[],"unit":"积分"}`, `{"amount":{},"unit":"积分"}`, `{"amount":1e999,"unit":"积分"}`, `{"amount":0,"unit":""}`, `{"amount":0,"unit":"  "}`, `{"amount":0,"unit":12}`, `{"amount":0,"unit":"积分","kind":"invalid"}`, `[]`, `"invalid"`} {
++		t.Run(raw, func(t *testing.T) {
++			q := telemetryTestQuota(t, raw)
++			if q.BalanceTelemetry != nil {
++				t.Fatalf("未知余额不得成为零：%+v", q.BalanceTelemetry)
++			}
++			notePluginBalanceHistory([]SubscriptionQuota{q}, time.Now())
++			if _, err := os.Stat(balanceHistPath()); !os.IsNotExist(err) {
++				t.Fatalf("不得从说明文字回退采数：%v", err)
++			}
++		})
++	}
++	var missing plugin.Usage
++	if err := json.Unmarshal([]byte(`{"balance":"999积分"}`), &missing); err != nil {
++		t.Fatal(err)
++	}
++	notePluginBalanceHistory([]SubscriptionQuota{quotaOfPlugin(SubscriptionQuota{Provider: "gaccode"}, missing)}, time.Now())
++	if _, err := os.Stat(balanceHistPath()); !os.IsNotExist(err) {
++		t.Fatal("缺少 telemetry 时不得采样余额文本")
++	}
++}
++
++func TestPluginBalanceTelemetryRecordsAndSeparates(t *testing.T) {
++	telemetryTestHome(t)
++	now := time.Now().UTC().Truncate(time.Second)
++	var last []SubscriptionQuota
++	for i, raw := range []string{
++		`{"amount":15000.125,"unit":"积分","kind":"replenishing","refillPerHour":300}`,
++		`{"amount":15300.125,"unit":"积分","kind":"replenishing","refillPerHour":300}`,
++		`{"amount":0,"unit":"积分","kind":"replenishing"}`,
++		`{"amount":-25.5,"unit":"积分","kind":"replenishing"}`,
++	} {
++		q := telemetryTestQuota(t, raw)
++		at := now.Add(time.Duration(i-3) * time.Minute)
++		q.ReadAt = &at
++		last = []SubscriptionQuota{q}
++		noteHistory(last, now)
++	}
++	pts := readBalanceHist()[telemetryHistKey(last[0])]
++	if len(pts) != 4 || pts[0].Amount != 15000.125 || pts[1].Amount != 15300.125 || pts[2].Amount != 0 || pts[3].Amount != -25.5 {
++		t.Fatalf("必须保留每次绝对值读数：%+v", pts)
++	}
++	if last[0].BalanceTrend == nil || last[0].BalanceTrend.RunsOut != nil || last[0].BalanceTrend.Unit != "积分" {
++		t.Fatalf("透支曲线不得预测未来耗尽：%+v", last[0].BalanceTrend)
++	}
++	// 相同 ReadAt、失败及旧读数都不得新增历史点。
++	for _, mode := range []string{"cached", "failed", "stale"} {
++		q := last[0]
++		if mode == "failed" {
++			q.Error = "合成错误"
++		}
++		if mode == "stale" {
++			q.AsOf = &now
++		}
++		notePluginBalanceHistory([]SubscriptionQuota{q}, now.Add(time.Minute))
++	}
++	if got := len(readBalanceHist()[telemetryHistKey(last[0])]); got != 4 {
++		t.Fatalf("重复采样：%d", got)
++	}
++	for _, field := range []string{"provider", "user", "unit", "kind"} {
++		q := telemetryTestQuota(t, `{"amount":9,"unit":"积分","kind":"replenishing"}`)
++		switch field {
++		case "provider":
++			q.Provider = "other"
++		case "user":
++			q.User = "key@example.invalid"
++		case "unit":
++			q.BalanceTelemetry.Unit = "USD"
++		case "kind":
++			q.BalanceTelemetry.Kind = ""
++		}
++		notePluginBalanceHistory([]SubscriptionQuota{q}, now)
++		if len(readBalanceHist()[telemetryHistKey(q)]) != 1 {
++			t.Fatalf("%s 曲线被合并", field)
++		}
++	}
++	card := last[0]
++	card.BalanceTrend = nil
++	got := withAccountReadings([]SubscriptionQuota{card})
++	if len(got) != 1 || got[0].BalanceTrend == nil || len(got[0].BalanceTrend.Points) != 4 {
++		t.Fatalf("缓存卡片丢失历史：%+v", got)
++	}
++}
++
++func TestPluginBalanceTelemetryNetForecast(t *testing.T) {
++	telemetryTestHome(t)
++	now := time.Now().UTC().Truncate(time.Second)
++	for _, tc := range []struct {
++		name    string
++		amounts []float64
++		step    time.Duration
++		predict bool
++	}{
++		{"净下降", []float64{13000, 12400, 11800}, time.Hour, true},
++		{"平", []float64{1000, 1000, 1000}, time.Hour, false},
++		{"下降后最新持平", []float64{13000, 12400, 12400}, time.Hour, false},
++		{"涨", []float64{1000, 1300, 1600}, time.Hour, false},
++		{"补充后样本不足", []float64{1000, 900, 12000, 11900}, time.Hour, false},
++		{"跨度不足", []float64{1000, 900, 800}, 20 * time.Minute, false},
++		{"零", []float64{1200, 600, 0}, time.Hour, false},
++		{"透支", []float64{1000, 400, -200}, time.Hour, false},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			var q SubscriptionQuota
++			for i, amount := range tc.amounts {
++				b, _ := json.Marshal(map[string]any{"amount": amount, "unit": "积分", "kind": "replenishing", "refillPerHour": 300})
++				q = telemetryTestQuota(t, string(b))
++				q.User = tc.name
++				at := now.Add(time.Duration(i-len(tc.amounts)+1) * tc.step)
++				q.ReadAt = &at
++				batch := []SubscriptionQuota{q}
++				notePluginBalanceHistory(batch, now)
++				q = batch[0]
++			}
++			tr := q.BalanceTrend
++			if tr == nil || len(tr.Points) != len(tc.amounts) || (tr.RunsOut != nil) != tc.predict {
++				t.Fatalf("净余额预测不符：%+v", tr)
++			}
++			if tc.predict && (math.Abs(tr.PerDay-14400) > 0.01 || math.Abs(tr.RunsOut.Sub(now).Hours()-11800.0/600) > 0.001) {
++				t.Fatalf("不得额外加减小时补充：%+v", tr)
++			}
++		})
++	}
++}
++
++func TestPluginBalanceTelemetryFiniteFit(t *testing.T) {
++	telemetryTestHome(t)
++	now := time.Now().UTC().Truncate(time.Second)
++	var batch []SubscriptionQuota
++	for i, amount := range []float64{1e308, 9e307, 8e307} {
++		b, _ := json.Marshal(map[string]any{"amount": amount, "unit": "积分", "kind": "replenishing"})
++		q := telemetryTestQuota(t, string(b))
++		at := now.Add(time.Duration(i-2) * time.Hour)
++		q.ReadAt = &at
++		batch = []SubscriptionQuota{q}
++		notePluginBalanceHistory(batch, now)
++	}
++	tr := batch[0].BalanceTrend
++	if tr == nil || len(tr.Points) != 3 || tr.Points[0].Amount != 1e308 || tr.FitFrom != nil || tr.RunsOut != nil || tr.PerDay != 0 || tr.FitStart != 0 || tr.FitNow != 0 {
++		t.Fatalf("极端有限余额必须保留点并清除溢出拟合：%+v", tr)
++	}
++	if _, err := json.Marshal(batch); err != nil {
++		t.Fatalf("遥测不得破坏卡片 JSON 编码：%v", err)
++	}
++}
++
++func TestPluginBalanceTelemetryOptionalRate(t *testing.T) {
++	for _, raw := range []string{`null`, `-1`, `"300"`, `false`, `1e999`} {
++		q := telemetryTestQuota(t, `{"amount":0,"unit":"积分","kind":"replenishing","refillPerHour":`+raw+`}`)
++		if !q.BalanceTelemetry.Valid() || *q.BalanceTelemetry.Amount != 0 || q.BalanceTelemetry.RefillPerHour != nil {
++			t.Fatalf("无效补充速率不应丢弃真实零余额或成为零速率：%s，%+v", raw, q.BalanceTelemetry)
++		}
++	}
++	q := telemetryTestQuota(t, `{"amount":15000,"unit":"积分","kind":"replenishing","refillPerHour":0}`)
++	if q.BalanceTelemetry.RefillPerHour == nil || *q.BalanceTelemetry.RefillPerHour != 0 {
++		t.Fatal("真实零补充速率必须保留")
++	}
++}
++
++func TestPluginBalanceTelemetryHistoryRetention(t *testing.T) {
++	telemetryTestHome(t)
++	now := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
++	kept := 45 * 24 * time.Hour
++	minutes := int(kept / time.Minute)
++	start := now.Add(-kept - time.Minute)
++	pts := make([]BalancePoint, minutes+1)
++	for i := range pts {
++		pts[i] = BalancePoint{At: start.Add(time.Duration(i) * time.Minute), Amount: 100000 - float64(i)}
++	}
++	// 在保留边界附近设置补充、归零和透支，验证裁剪不压缩这些实际读数。
++	for i, amount := range []float64{12000, 12300, 0, -25.5} {
++		pts[i+1].Amount = amount
++	}
++	q := telemetryTestQuota(t, `{"amount":35199,"unit":"积分","kind":"replenishing"}`)
++	q.ReadAt = &now
++	key := telemetryHistKey(q)
++	idle := q
++	idle.User = "idle@example.invalid"
++	idleKey := telemetryHistKey(idle)
++	nativeKey := quotaHistKey("deepseek", "main")
++	native := slices.Clone(pts[1 : balanceHistMax+2])
++	writeBalanceHist(balanceHist{key: pts, idleKey: slices.Clone(pts[1:]), nativeKey: native})
++
++	batch := []SubscriptionQuota{q}
++	notePluginBalanceHistory(batch, now)
++	h := readBalanceHist()
++	want := append(slices.Clone(pts[1:]), BalancePoint{At: now, Amount: 35199})
++	if len(h[key]) != minutes+1 {
++		t.Fatalf("每分钟采样应保留完整 45 天及两端读数：实际 %d 点，预期 %d 点", len(h[key]), minutes+1)
++	}
++	if !slices.Equal(h[key], want) {
++		t.Fatal("45 天边界裁剪必须仅删除过期点，保留补充、零值、负值及最新读数")
++	}
++	if !slices.Equal(h[idleKey], pts[1:]) {
++		t.Fatal("其他账户的有效遥测历史不能因本次写入而被 4000 点上限截断")
++	}
++	if !slices.Equal(h[nativeKey], native[1:]) {
++		t.Fatal("传统 API 余额仍应采用原有 4000 点容量")
++	}
++	tr := batch[0].BalanceTrend
++	if tr == nil || len(tr.Points) != 14*24*60+1 || !tr.Points[0].At.Equal(now.Add(-14*24*time.Hour)) {
++		t.Fatal("走势图应覆盖完整 14 天，不应缩短至约 2.8 天")
++	}
++	if tr.FitFrom == nil || !tr.FitFrom.Equal(now.Add(-7*24*time.Hour)) {
++		t.Fatalf("预计用完时间应采用完整 7 天拟合范围：实际起点 %v", tr.FitFrom)
++	}
++	if math.Abs(tr.PerDay-1440) > 0.01 || tr.RunsOut == nil ||
++		math.Abs(tr.RunsOut.Sub(now).Minutes()-35199) > 0.01 {
++		t.Fatalf("完整历史仍应保留净下降预测：每日 %v，预计用完时间 %v", tr.PerDay, tr.RunsOut)
++	}
++}
++
++func TestPluginBalanceTelemetryHistoryCapacity(t *testing.T) {
++	telemetryTestHome(t)
++	now := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
++	limit := 45*24*60 + 1
++	q := telemetryTestQuota(t, `{"amount":1,"unit":"积分","kind":"replenishing"}`)
++	q.ReadAt = &now
++	key := telemetryHistKey(q)
++	// 高频手动刷新仍有容量上限；超限只删除最旧点，保留最新实测值。
++	pts := make([]BalancePoint, limit)
++	for i := range pts {
++		pts[i] = BalancePoint{At: now.Add(time.Duration(i-limit) * time.Second), Amount: float64(limit - i + 1)}
++	}
++	writeBalanceHist(balanceHist{key: pts})
++	notePluginBalanceHistory([]SubscriptionQuota{q}, now)
++	want := append(slices.Clone(pts[1:]), BalancePoint{At: now, Amount: 1})
++	got := readBalanceHist()[key]
++	if !slices.Equal(got, want) {
++		t.Fatalf("高频查询超限后应保留最新 %d 个完整读数：实际 %d 个", limit, len(got))
++	}
++}
+diff --git a/internal/plugin/host_balance_telemetry_test.go b/internal/plugin/host_balance_telemetry_test.go
+new file mode 100644
+index 0000000..3928ac4
+--- /dev/null
++++ b/internal/plugin/host_balance_telemetry_test.go
+@@ -0,0 +1,151 @@
++package plugin
++
++import (
++	"bytes"
++	"context"
++	"os"
++	"os/exec"
++	"testing"
++	"time"
++)
++
++func TestHostBalanceTelemetry(t *testing.T) {
++	bun, err := exec.LookPath("bun")
++	if err != nil {
++		t.Fatal("限定测试需要 Bun")
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
++	defer cancel()
++	cmd := exec.CommandContext(ctx, bun, "--no-env-file", "--config=/dev/null", "-e", hostBalanceTelemetryTest)
++	cmd.Stdin = bytes.NewReader(hostJS)
++	if out, err := cmd.CombinedOutput(); err != nil {
++		t.Fatalf("host 余额协议失败：%v\n%s", err, out)
++	}
++}
++
++const hostBalanceTelemetryTest = `
++const assert = require('node:assert/strict')
++const vm = require('node:vm')
++const source = require('node:fs').readFileSync(0, 'utf8')
++let answer
++const context = vm.createContext({
++  auths: () => new Map([['fixture', {auth:{usage:async()=>answer}}]]),
++  accountKey: () => 'synthetic', readAuth: () => ({synthetic:{type:'api',key:'synthetic'}}),
++  fresh: async()=>{}, info:async()=>({}), inScope:(_,key,fn)=>fn(),
++})
++vm.runInContext(source.slice(source.indexOf('async function usageOf('), source.indexOf('// ---- check-in')), context)
++const check = async b => {
++  answer = {balance:'300/时，说明12000', balanceTelemetry:b}
++  return JSON.parse(JSON.stringify(await vm.runInContext('usageOf("fixture", "synthetic")', context)))
++}
++;(async()=>{
++  for (const b of [undefined,null,{},[],{amount:null,unit:'积分'},{amount:'0',unit:'积分'},{amount:false,unit:'积分'},{amount:NaN,unit:'积分'},{amount:Infinity,unit:'积分'},{amount:0,unit:''},{amount:0,unit:' '},{amount:0,unit:9},{amount:0,unit:'积分',kind:null},{amount:0,unit:'积分',kind:'invalid'}]) {
++    const result = await check(b)
++    assert.ok(!Object.hasOwn(result,'balanceTelemetry'),'未知值不能转为零')
++    assert.equal(result.balance,'300/时，说明12000')
++  }
++  for (const amount of [0,-25.5,15300.125]) {
++    const b = {amount,unit:'积分',kind:'replenishing',refillPerHour:300}
++    assert.deepEqual((await check(b)).balanceTelemetry,b)
++  }
++  for (const rate of [null,-1,'300',NaN,Infinity]) {
++    const b = (await check({amount:1,unit:'积分',kind:'replenishing',refillPerHour:rate})).balanceTelemetry
++    assert.equal(b.amount,1)
++    assert.ok(!Object.hasOwn(b,'refillPerHour'))
++  }
++})().catch(error=>{console.error(error);process.exitCode=1})
++`
++
++func TestPluginBalanceTelemetryGUI(t *testing.T) {
++	bun, err := exec.LookPath("bun")
++	if err != nil {
++		t.Fatal("限定测试需要 Bun")
++	}
++	source, err := os.ReadFile("../gui/assets/app.js")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
++	defer cancel()
++	cmd := exec.CommandContext(ctx, bun, "--no-env-file", "--config=/dev/null", "-e", pluginBalanceTelemetryGUITest)
++	cmd.Stdin = bytes.NewReader(source)
++	if out, err := cmd.CombinedOutput(); err != nil {
++		t.Fatalf("余额 GUI 契约失败：%v\n%s", err, out)
++	}
++}
++
++const pluginBalanceTelemetryGUITest = `
++const assert = require('node:assert/strict')
++const vm = require('node:vm')
++const source = require('node:fs').readFileSync(0, 'utf8')
++class Element {
++  constructor(tag, cls='', text='') { this.tag=tag; this.cls=cls; this.textContent=text; this.children=[]; this.attrs={}; this.style={}; this.classList={toggle:()=>true}; }
++  append(...xs) { this.children.push(...xs) }
++  replaceChildren(...xs) { this.children=xs }
++  setAttribute(k,v) { this.attrs[k]=v }
++}
++const now = Date.now()
++const context = vm.createContext({
++  Date, quotaRange:'all', intlLang:()=> 'zh-CN', t:x=>x,
++  el:(tag,cls,text)=>new Element(tag,cls,text),
++  sv:(tag,attrs,style)=>{const e=new Element(tag);e.attrs=attrs||{};e.style=style||{};return e},
++  curveZoom:()=>{}, untilText:at=>String(at), quotaTimeText:()=>'',
++})
++vm.runInContext(source.slice(source.indexOf('function balanceAmount('),source.indexOf('function setQuotaRange(')),context)
++vm.runInContext(source.slice(source.indexOf('function quotaLines('),source.indexOf('// quotaCycleBreak:')),context)
++const find=(e,p)=>e.children?.flatMap(x=>typeof x==='object'?[...(p(x)?[x]:[]),...find(x,p)]:[])||[]
++const card={balance:'15300.125 积分',balanceTelemetry:{amount:15300.125,unit:'积分',kind:'replenishing'},balanceTrend:{points:[{at:new Date(now-3600000).toISOString(),amount:-25.5},{at:new Date(now).toISOString(),amount:15300.125}]}}
++context.card=card
++assert.equal(vm.runInContext('balanceAmount(card,15300.125)',context),'15,300.125 积分')
++assert.equal(vm.runInContext('quotaLines(card).length',context),0)
++let curve=vm.runInContext('balanceCurve(card)',context)
++assert.ok(curve)
++const zero=find(curve,e=>e.attrs['aria-label']==='零余额')[0]
++assert.ok(zero && zero.attrs.y1>0 && zero.attrs.y1<60,'负值零线位于图内')
++const path=find(curve,e=>e.tag==='path')[0]
++assert.ok(path.attrs.d.split('L').length===2,'保留两次实测读数')
++card.balanceTrend.points=card.balanceTrend.points.slice(0,1)
++assert.equal(vm.runInContext('balanceCurve(card)',context),null,'不足两点不显示曲线')
++card.balanceTrend.points.push({at:new Date(now).toISOString(),amount:20})
++card.balanceTrend.fitFrom=new Date(now-3600000).toISOString()
++card.balanceTrend.fitStart=40;card.balanceTrend.fitNow=20;card.balanceTrend.perDay=480
++card.balanceTrend.runsOut=new Date(now+3600000).toISOString()
++card.balanceTelemetry.amount=20
++curve=vm.runInContext('balanceCurve(card)',context)
++assert.ok(find(curve,e=>e.attrs.class==='qc-even bc-fit').length,'保留原生拟合虚线')
++assert.ok(find(curve,e=>String(e.textContent).includes('按近期净下降速度')).length,'预测使用净下降文案')
++card.balanceTelemetry.amount=0
++curve=vm.runInContext('balanceCurve(card)',context)
++assert.ok(find(curve,e=>e.textContent==='当前已耗尽').length)
++assert.equal(find(curve,e=>String(e.textContent).includes('预计')).length,0,'零余额不谎报未来耗尽')
++for (const amounts of [[-1e308,1e308],[1e308,-1e308],[-Number.MAX_VALUE,Number.MAX_VALUE],[0,0],[-Number.MIN_VALUE,Number.MIN_VALUE]]) {
++  card.balanceTelemetry.amount=amounts[1]
++  card.balanceTrend={points:amounts.map((amount,i)=>({at:new Date(now+(i-1)*3600000).toISOString(),amount})),fitFrom:new Date(now-3600000).toISOString(),fitStart:amounts[0],fitNow:amounts[1]}
++  curve=vm.runInContext('balanceCurve(card)',context)
++  const path=find(curve,e=>e.tag==='path')[0]
++  assert.ok(path && !/NaN|Infinity/.test(path.attrs.d),'极端有限余额的折线坐标必须有限')
++  const coords=path.attrs.d.match(/-?\d+(?:\.\d+)?/g).map(Number)
++  assert.equal(coords.length,4)
++  assert.ok(coords.every(Number.isFinite))
++  assert.ok(coords[1]>=0 && coords[1]<=60 && coords[3]>=0 && coords[3]<=60)
++  for (const line of find(curve,e=>e.tag==='line')) {
++    assert.ok(['x1','x2','y1','y2'].every(k=>Number.isFinite(line.attrs[k])),'零线与拟合线坐标必须有限')
++  }
++  if (amounts[0]!==amounts[1]) assert.notEqual(coords[1],coords[3],'极端正负余额不能压成同一条线')
++}
++context.quotaFit={observe:()=>{throw Error('遥测强制换行不得由观察器撤销')}}
++context.quotaText=()=> '原生余额 · 50%'
++context.quotaFill=()=>50
++context.quotaLeft=false
++vm.runInContext(source.slice(source.indexOf('function quotaWindows('),source.indexOf('// Keep the last date')),context)
++card.windows=[{name:'积分余量',used:50,display:'6000 积分（补充基准12000积分） · 300/时，今日已申请'}]
++const windows=vm.runInContext('quotaWindows(card)',context)
++assert.equal(windows.cls,'quota-windows stacked')
++const number=find(windows,e=>e.cls==='quota-n')[0]
++assert.equal(number.children[0].textContent,'余额缺口 50%','百分比必须独立且优先可见')
++assert.equal(number.children[2].textContent,'6000 积分（补充基准12000积分）')
++assert.equal(number.children[4].textContent,'300/时，今日已申请')
++assert.ok(number.title.includes(card.windows[0].display),'完整说明保留在提示中')
++context.quotaRange='off'
++assert.equal(vm.runInContext('balanceCurve(card)',context),null,'沿用原生开关')
++`
