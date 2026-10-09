@@ -69,7 +69,7 @@ function receiptFixture(rows, historyReply) {
 test("a positive refill linked to the complete ticket number confirms reset even after those credits were spent", async () => {
   const { seen, ticket } = receiptFixture((row) => [row])
   const result = await usage(withJwt)
-  expect(result.windows[0].display).toContain("-25 / 12000")
+  expect(result.windows[0].display).toContain("-25 积分（补充基准 12000 积分）")
   expect(result.windows[0].display).toContain("今日已重置（+12484 积分）")
   expect(result.windows[0].display).not.toContain("工单已关闭")
   const req = seen.find((r) => new URL(r.url).pathname === "/api/credits/history")
@@ -117,7 +117,7 @@ test("a history read failure keeps credits and the application visible without c
   receiptFixture(() => [], Response.json({}, { status: 503 }))
   const result = await usage(withJwt)
   expect(result.error).toBeUndefined()
-  expect(textOf(result)).toContain("-25 / 12000")
+  expect(textOf(result)).toContain("-25 积分（补充基准 12000 积分）")
   expect(textOf(result)).toContain("今日已申请")
   expect(textOf(result)).toContain("积分流水读取失败")
   expect(textOf(result)).not.toContain("今日已重置")
@@ -159,10 +159,10 @@ test("website credits, identity and subscription survive an API-key statusline r
   expect(result.plan).toBe("GAC Max")
   expect(result.until).toBe("2099-01-01T00:00:00Z")
   expect(result.renew).toBe("auto")
-  expect(result.windows[0].display).toContain("3020 / 12000 · 300/时")
+  expect(result.windows[0].display).toContain("3020 积分（补充基准 12000 积分）（300/时")
   expect(result.windows[0].display).toContain("今日已申请（工单已关闭）")
   expect(result.windows[0].display).not.toMatch(/网站账户|套餐 GAC Max|选项关闭/)
-  expect(result.balance).toBeUndefined()
+  expect(result.balance).toBe("3020 积分")
   expect(result.signIn).toBe("kept")
   expect(seen.every((r) => r.method === "GET")).toBe(true)
 })
@@ -177,7 +177,7 @@ test("website balance is not replaced by another API-key account's balance or mu
   const result = await usage(withJwt)
   expect(result.user).toBe("website@example.invalid")
   expect(result.plan).toBe("GAC Max")
-  expect(result.windows[0].display).toContain("20 / 100 · 5/时")
+  expect(result.windows[0].display).toContain("20 积分（补充基准 100 积分）（5/时")
   expect(result.windows[0].display).not.toContain("7x")
 })
 
@@ -238,12 +238,12 @@ for (const refused of ["status", "website"]) {
   })
 }
 
-test("continuous credit refill is an aside, not a fabricated reset window", async () => {
+test("持续补充积分参与路由，不生成虚假的周期重置", async () => {
   fakeUsage()
-  const result = await usage(withJwt)
+  const result = await usage()
   expect(result.windows.length).toBeGreaterThan(0)
   for (const window of result.windows) {
-    expect(window.aside).toBe(true)
+    expect(window.aside).toBe(false)
     expect(window.span).toBeUndefined()
     expect(window.resetsAt).toBeUndefined()
   }
@@ -282,18 +282,19 @@ test("no USD account and no booster packs are left off the card", async () => {
   expect(textOf(await usage(withJwt))).not.toMatch(/USD|加油包/)
 })
 
-test("rate, multiplier and notes stay in the one display part magpie shows after the count", async () => {
+test("补充速度、倍率和附注不占用原生百分比的分隔符", async () => {
   const email = "fixture@example.invalid"
   fakeUsage({ [creditPath]: { balance: 20, creditCap: 100, refillRate: 5 },
     [statusPath]: { balance: 20, creditCap: 100, timeMultiplier: { value: 2 }, user: { email } },
     "/api/me": { user: { email } },
     "/api/usd-account": { account: { balanceUsd: 1 } } })
   const result = await usage(withJwt)
-  const [count, rest, ...dropped] = result.windows[0].display.split(" · ")
-  expect(count).toBe("20 / 100")
-  expect(rest).toMatch(/^5\/时，时段 2x，/)
-  expect(dropped).toEqual([])
-  expect(result.balance).toBe("$1")
+  const display = result.windows[0].display
+  expect(display).toMatch(/^20 积分（补充基准 100 积分）（5\/时，时段 2x，/)
+  expect(display).not.toContain(" · ")
+  expect(result.windows[0]).toMatchObject({ used: 80, aside: false })
+  expect(result.balance).toBe("20 积分")
+  expect(display).toContain("USD $1")
 })
 
 test("expired unused booster is not displayed as available", () => {
@@ -336,8 +337,8 @@ for (const balance of [undefined, null, false, true, "", "   ", "not-a-balance",
 test("numeric zero status balance remains a real zero, separately from unknown", async () => {
   fakeUsage({ [statusPath]: { balance: 0, creditCap: 100, timeMultiplier: { value: 1 } } })
   const result = await usage()
-  expect(textOf(result)).toMatch(/0\s*\/\s*100/)
-  expect(result.windows[0]).toMatchObject({ used: 100, aside: true })
+  expect(result.balance).toBe("0 积分")
+  expect(result.windows[0]).toMatchObject({ used: 100, aside: false })
 })
 
 test("booster summary distinguishes expired, used and available credit without counting expired as usable", () => {
@@ -351,7 +352,7 @@ test("booster summary distinguishes expired, used and available credit without c
   expect(result.display).not.toMatch(/100\s*积分\s*·\s*可用|可用[^；]*100/)
 })
 
-test("balance is the USD amount alone; website identity and plan head the card without repeating in notes", async () => {
+test("积分余额独立展示，USD 和账户说明保留为附注", async () => {
   const email = "long-website-fixture@example.invalid"
   const plan = "Fixture Website Plan"
   const pack = { id: 301, comment: "fixture-booster-detail", credits: 9, isUsed: false, expiresAt: "2099-01-01T00:00:00Z" }
@@ -363,10 +364,11 @@ test("balance is the USD amount alone; website identity and plan head the card w
     "/api/tickets?page=1&limit=20": { tickets: [{ title: "请求重置积分", createdAt: new Date().toISOString(), status: "CLOSED" }] },
   })
   const result = await usage(withJwt)
-  expect(result.balance).toBe("$12.34")
+  expect(result.balance).toBe("2 积分")
+  expect(result.windows[0].display).toContain("USD $12.34")
   const balance = result.windows[0].display
-  // magpie shows a display's first two " · " parts only
-  expect(balance.split(" · ").length).toBe(2)
+  // 原生界面在显示内容后追加百分比，附注不能再插入同一分隔符。
+  expect(balance.split(" · ").length).toBe(1)
   expect(result.user).toBe(email)
   expect(result.plan).toBe(plan)
   expect(balance).not.toContain(email)
@@ -439,7 +441,8 @@ test("a website account matching the key's email names the plan instead of repea
   const result = await usage(withJwt)
   expect(result.user.toLowerCase()).toBe(email)
   expect(result.plan).toBe("GAC Max")
-  expect(result.balance).toBe("$3")
+  expect(result.balance).toBe("2 积分")
+  expect(result.windows[0].display).toContain("USD $3")
   expect(result.windows[0].display).not.toContain(email)
 })
 
@@ -447,9 +450,9 @@ test("website identity keeps naming website credits when the optional statusline
   fakeUsage({ [statusPath]: Response.json({}, { status: 401 }), "/api/me": { email: "website@example.invalid" } })
   const result = await usage(withJwt)
   expect(result.user).toBe("website@example.invalid")
-  expect(result.balance).toBeUndefined()
+  expect(result.balance).toBe("2 积分")
   expect(result.error).toBeUndefined()
-  expect(result.windows[0].display).toContain("2 / 100")
+  expect(result.windows[0].display).toContain("2 积分（补充基准 100 积分）")
   expect(result.signIn).toBe("kept")
 })
 
