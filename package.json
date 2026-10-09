@@ -8,7 +8,6 @@
   "files": [
     "index.mjs",
     "refill.mjs",
-    "compat",
     "README.md",
     "LICENSE"
   ],
