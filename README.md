@@ -242,8 +242,10 @@ Website credentials remain on gaccode.com even if inference uses a relay.
 The website plan heads the website credit card and its email is not repeated
 in the notes. A readable different API-key identity is listed separately.
 卡片的余额数值为实测积分，网站 USD 金额放在附注。积分行用括号显示
-补充速度、非 1x 倍率、加油包数量、今日补充工单和账户说明，使用“，”连接。
-“ · ”留给原生百分比。缺少有效补充基准时，这些信息显示在余额文本中。
+补充速度、非 1x 倍率、`已重置` 或 `未重置`、加油包数量、今日补充工单
+和账户说明，使用“，”连接。“ · ”留给原生百分比。缺少有效补充基准时，
+这些信息显示在余额文本中。`未重置` 表示今天尚未确认积分到账；缺少凭据
+或读取失败时，会保留相应说明，不代表确认了未重置。
 When the credit query fails or its balance is unknown,
 the card shows the query error; website details never replace it as a balance.
 A missing USD
@@ -262,8 +264,9 @@ ticket's creation time and a fixed query cutoff. It confirms a reset only
 from a positive numeric `refill` record whose `details` exactly matches the
 observed `Automatic refill via support ticket #<complete ID>` format,
 with a valid `balanceAfter` and timestamp in that interval. A conflicting
-account ID is rejected. The card then shows `今日已重置（+12484 积分）`, for
-example; the current balance need not remain full after subsequent use.
+account ID is rejected. The card then shows `已重置` and keeps the receipt
+detail, such as `今日已重置（+12484 积分）`; the current balance need not remain
+full after subsequent use.
 Hourly refills, other tickets, malformed or unrecognized records never
 confirm it. Lookup is limited to five validated 100-row pages with a shared
 six-second timeout. Failures or incomplete pagination keep the application
@@ -424,7 +427,7 @@ persistent cross-process deduplication and keeping quota reads read-only.
 
 - 网站 JWT 按原版方式读取网站积分、账号和套餐；API key 用于推理，无 JWT 时也可尝试基础积分查询。
 - 本仓库为非官方插件，未获 magpie / GACCode 审核或背书；从 GitHub 安装，尚未发布 npm。
-- `autoRequestRefill` 默认开启；显式设为 `false` 可关闭，未设置时仍保留旧配置的关闭状态。仅在托管推理明确积分耗尽时申请一次工单。额度刷新只读匹配对应工单的补充流水，确认后显示“今日已重置（+积分）”。
+- `autoRequestRefill` 默认开启；显式设为 `false` 可关闭，未设置时仍保留旧配置的关闭状态。仅在托管推理明确积分耗尽时申请一次工单。额度刷新只读匹配对应工单的补充流水，确认后卡片显示“已重置”，悬停显示“今日已重置（+积分）”；尚未确认时卡片显示“未重置”，申请进度和读取异常保留在悬停详情中。
 - 不保存网站密码，不购买或使用加油包。
 - 网站余额与 API key 消费额度分别看待；额度读取失败不会停用推理。
 - relay 按账号选择；已知模型沿用原版配置声明，未知模型保持未知，用户显式配置优先。

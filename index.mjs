@@ -437,8 +437,10 @@ async function buildUsage(auth, refill) {
     ] : []),
   ])
   const out = { plan: "GACCode", windows: [], signIn: "kept" }
+  const summary = []
   const notes = []
   let appliedToday = false
+  let resetToday = false
   const status = settled[0]
   const keyStatus = token ? settled[6] : status
   const keyAccount = keyStatus?.status === "fulfilled" ? emailFromMe(keyStatus.value) : ""
@@ -457,12 +459,12 @@ async function buildUsage(auth, refill) {
       const balanceTelemetry = { amount: balance, unit: "积分", kind: "replenishing" }
       if (refillRate !== null && refillRate >= 0) {
         balanceTelemetry.refillPerHour = refillRate
-        notes.push(`${refillRate}/时`)
+        summary.push(`${refillRate}/时`)
       }
       out.balance = `${balance} 积分`
       out.balanceTelemetry = balanceTelemetry
       // 1x is the normal rate; a missing multiplier is left out, never guessed.
-      if (mult !== null && mult > 0 && mult !== 1) notes.push(`时段 ${mult}x`)
+      if (mult !== null && mult > 0 && mult !== 1) summary.push(`时段 ${mult}x`)
       // 路由只读 API key 的状态，网站余额和支付余额各自保留来源。
       if (token && !sameAccount) {
         const website = creditWindow(status.value, "网站积分", true)
@@ -507,6 +509,7 @@ async function buildUsage(auth, refill) {
     if (refill.error) notes.push(`工单读取失败（${refill.error}）`)
     else if (refill.already) {
       appliedToday = true
+      resetToday = !!refill.receipt
       notes.push(refill.receipt ? `今日已重置（+${refill.receipt.amount} 积分）`
         : `今日已申请（工单${TICKET_STATES.get(refill.ticket?.status) ?? "状态未知"}）`)
       if (refill.receiptError) notes.push(refill.receiptError)
@@ -526,10 +529,14 @@ async function buildUsage(auth, refill) {
   // 原生界面用“ · ”分隔计数和百分比，附注放在计数内，避免挤掉百分比。
   if (autoNote && autoNote !== "自动申请：选项关闭" &&
       !(appliedToday && ["自动申请：待触发", "自动申请：已申请", "自动申请：已有同日申请或待处理工单"].includes(autoNote))) notes.push(autoNote)
+  summary.push(resetToday ? "已重置" : "未重置")
+  // "未重置" means no confirmed receipt today, including unreadable evidence.
+  if (!resetToday && !appliedToday) notes.unshift(token ? "今日尚未确认重置" : "今日重置未核验（需网站 JWT）")
   const credit = out.windows[0]
+  const displayNotes = [...summary, ...notes]
   if (credit) {
-    if (notes.length) credit.display += "（" + notes.join("，") + "）"
-  } else if (notes.length) out.balance += "（" + notes.join("，") + "）"
+    if (displayNotes.length) credit.display += "（" + displayNotes.join("，") + "）"
+  } else if (displayNotes.length) out.balance += "（" + displayNotes.join("，") + "）"
   return out
 }
 

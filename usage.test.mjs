@@ -70,6 +70,7 @@ test("a positive refill linked to the complete ticket number confirms reset even
   const { seen, ticket } = receiptFixture((row) => [row])
   const result = await usage(withJwt)
   expect(result.windows[0].display).toContain("-25 积分（补充基准 12000 积分）")
+  expect(result.windows[0].display).toContain("300/时，已重置")
   expect(result.windows[0].display).toContain("今日已重置（+12484 积分）")
   expect(result.windows[0].display).not.toContain("工单已关闭")
   const req = seen.find((r) => new URL(r.url).pathname === "/api/credits/history")
@@ -97,6 +98,7 @@ for (const [label, change] of [
     const result = await usage(withJwt)
     expect(textOf(result)).toContain("今日已申请（工单已关闭）")
     expect(textOf(result)).not.toContain("今日已重置")
+    expect(result.windows[0].display).toContain("300/时，未重置")
   })
 }
 
@@ -121,6 +123,7 @@ test("a history read failure keeps credits and the application visible without c
   expect(textOf(result)).toContain("今日已申请")
   expect(textOf(result)).toContain("积分流水读取失败")
   expect(textOf(result)).not.toContain("今日已重置")
+  expect(result.windows[0].display).toContain("300/时，未重置")
 })
 
 test("unknown history pagination cannot turn an apparent matching row into a confirmed reset", async () => {
@@ -282,7 +285,7 @@ test("no USD account and no booster packs are left off the card", async () => {
   expect(textOf(await usage(withJwt))).not.toMatch(/USD|加油包/)
 })
 
-test("补充速度、倍率和附注不占用原生百分比的分隔符", async () => {
+test("补充速度、倍率和重置状态不占用原生百分比的分隔符", async () => {
   const email = "fixture@example.invalid"
   fakeUsage({ [creditPath]: { balance: 20, creditCap: 100, refillRate: 5 },
     [statusPath]: { balance: 20, creditCap: 100, timeMultiplier: { value: 2 }, user: { email } },
@@ -290,7 +293,7 @@ test("补充速度、倍率和附注不占用原生百分比的分隔符", async
     "/api/usd-account": { account: { balanceUsd: 1 } } })
   const result = await usage(withJwt)
   const display = result.windows[0].display
-  expect(display).toMatch(/^20 积分（补充基准 100 积分）（5\/时，时段 2x，/)
+  expect(display).toMatch(/^20 积分（补充基准 100 积分）（5\/时，时段 2x，未重置，/)
   expect(display).not.toContain(" · ")
   expect(result.windows[0]).toMatchObject({ used: 80, aside: false })
   expect(result.balance).toBe("20 积分")
@@ -319,8 +322,19 @@ test("a refill ticket proves an application, not that credits were replenished",
 test("empty first page of tickets cannot prove there was never an application today", async () => {
   fakeUsage()
   // Old saved metadata may remain even after removal of the automatic-reset prompt.
-  expect(textOf(await usage({ ...withJwt, metadata: { ...withJwt.metadata, autoDailyReset: "off" } })))
-    .not.toMatch(/今日未申请|今日未重置|今天从未申请|never.*today/i)
+  const result = await usage({ ...withJwt, metadata: { ...withJwt.metadata, autoDailyReset: "off" } })
+  expect(result.windows[0].display).toContain("5/时，未重置")
+  expect(result.windows[0].display).toContain("今日尚未确认重置")
+  expect(textOf(result)).toContain("今日尚未确认重置")
+  expect(textOf(result)).not.toMatch(/今日未申请|今日未重置|今天从未申请|never.*today/i)
+})
+
+test("without a website JWT, the short reset state retains its unverified reason in the title", async () => {
+  fakeUsage()
+  const display = (await usage()).windows[0].display
+  expect(display).toContain("2 积分（补充基准 100 积分）")
+  expect(display).toContain("5/时，未重置")
+  expect(display).toContain("今日重置未核验（需网站 JWT）")
 })
 
 for (const balance of [undefined, null, false, true, "", "   ", "not-a-balance", {}]) {
@@ -369,6 +383,7 @@ test("积分余额独立展示，USD 和账户说明保留为附注", async () =
   const balance = result.windows[0].display
   // 原生界面在显示内容后追加百分比，附注不能再插入同一分隔符。
   expect(balance.split(" · ").length).toBe(1)
+  expect(balance).toContain("5/时，未重置")
   expect(result.user).toBe(email)
   expect(result.plan).toBe(plan)
   expect(balance).not.toContain(email)
@@ -414,6 +429,7 @@ for (const [status, label] of [
       tickets: [{ category: { key: "REQUEST_TO_REFILL_CREDIT" }, createdAt: new Date().toISOString(), status }],
     } })
     const display = (await usage(withJwt)).windows[0].display
+    expect(display).toContain("5/时，未重置")
     expect(display).toContain(label)
     expect(display).not.toContain(email)
     expect(display).not.toMatch(/已到账|今日已重置|审批通过|申请失败/)
